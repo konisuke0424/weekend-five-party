@@ -2,7 +2,23 @@ import express from "express";
 import { createServer } from "node:http";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { execSync } from "node:child_process";
 import { Server } from "socket.io";
+
+function resolveVersion() {
+  // Render は git-based deploy で RENDER_GIT_COMMIT に full hash を注入する
+  if (process.env.RENDER_GIT_COMMIT) {
+    return process.env.RENDER_GIT_COMMIT.slice(0, 7);
+  }
+  try {
+    return execSync("git rev-parse --short HEAD", { stdio: ["ignore", "pipe", "ignore"] })
+      .toString()
+      .trim();
+  } catch {
+    return "local-dev";
+  }
+}
+const VERSION = resolveVersion();
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -1297,7 +1313,7 @@ io.on("connection", (socket) => {
 });
 
 app.get("/api/health", (_request, response) => {
-  response.json({ ok: true, rooms: rooms.size });
+  response.json({ ok: true, rooms: rooms.size, version: VERSION });
 });
 
 const distPath = join(__dirname, "..", "dist");
