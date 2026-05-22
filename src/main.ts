@@ -32,6 +32,13 @@ type LastSkipped = {
   reason: string;
 };
 
+type LastMulligan = {
+  id: string;
+  playerId: string;
+  playerName: string;
+  swapped: number;
+};
+
 type Player = {
   id: string;
   name: string;
@@ -71,6 +78,7 @@ type RoomState = {
   winnerIds: string[];
   lastPlayed: LastPlayed | null;
   lastSkipped: LastSkipped | null;
+  lastMulligan: LastMulligan | null;
   log: string[];
   structuredLog: Array<{ text: string; subjectId: string | null; targetId: string | null }>;
   myHand: Card[];
@@ -348,6 +356,7 @@ let lastRevealId = "";
 let mulliganMode = false;
 const mulliganSelected = new Set<string>();
 let lastShownSkipId: string | null = null;
+let lastShownMulliganId: string | null = null;
 let skipToastTimer: number | undefined;
 
 // Sequential play queue: each new lastPlayed.id is queued; the worker shows
@@ -477,6 +486,25 @@ function escapeHtml(value: string) {
 }
 
 function formatFollowers(value: number) {
+  // < 1万: そのままカンマ区切り。1万以上は万・億・兆・京で短縮。
+  const sign = value < 0 ? "-" : "";
+  const abs = Math.abs(value);
+  const units: Array<{ v: number; n: string }> = [
+    { v: 1e16, n: "京" },
+    { v: 1e12, n: "兆" },
+    { v: 1e8, n: "億" },
+    { v: 1e4, n: "万" },
+  ];
+  for (const u of units) {
+    if (abs >= u.v) {
+      const scaled = abs / u.v;
+      // 10未満は小数1桁を切り捨てで表示。10以上は整数(切り捨て)。末尾の .0 は落とす。
+      const shown = scaled >= 10
+        ? Math.floor(scaled).toString()
+        : (Math.floor(scaled * 10) / 10).toString();
+      return `${sign}${shown}${u.n}`;
+    }
+  }
   return new Intl.NumberFormat("ja-JP").format(value);
 }
 
@@ -937,6 +965,16 @@ function delay(ms: number) {
   return new Promise<void>((resolve) => window.setTimeout(resolve, ms));
 }
 
+function showMulliganBanner(mul: LastMulligan) {
+  if (mul.id === lastShownMulliganId) return;
+  lastShownMulliganId = mul.id;
+  // Reuse the existing card-effect-banner at the top of the game-upper area.
+  // Name = "マリガン", text = "<player> が N 枚交換".
+  showCardEffectBanner("マリガン", `${mul.playerName} が ${mul.swapped} 枚交換`, {
+    durationMs: 2600
+  });
+}
+
 function showSkipToast(skip: LastSkipped) {
   if (skip.id === lastShownSkipId) return;
   lastShownSkipId = skip.id;
@@ -1040,8 +1078,8 @@ function updateUi(state: RoomState | null) {
 
   const myTurn = isMyTurn(state);
   // Auto-exit mulligan mode if it's no longer our turn, hand is empty,
-  // or we've already used mulligan this turn.
-  if (mulliganMode && (!myTurn || state.myHand.length === 0 || state.myMulliganedThisTurn)) {
+  // or we've run out of motivation (mulligan now costs 1 each time, no per-turn limit).
+  if (mulliganMode && (!myTurn || state.myHand.length === 0 || (state.currentMotivation ?? 0) < 1)) {
     mulliganMode = false;
     mulliganSelected.clear();
     handPanel.classList.remove("mulligan-mode");
@@ -1055,10 +1093,10 @@ function updateUi(state: RoomState | null) {
     : "";
   endTurnButton.classList.toggle("hidden", !myTurn || mulliganMode);
 
-  // Mulligan button: shown on my turn, hand has cards, not yet used this turn,
-  // not retired, and we have at least 1 motivation (mulligan now costs -1).
+  // Mulligan button: shown on my turn, hand has cards, not retired,
+  // and we have at least 1 motivation. No per-turn limit anymore — each
+  // mulligan just costs 1 motivation, so it's bounded by current motivation.
   const canMulligan = myTurn
-    && !state.myMulliganedThisTurn
     && state.myHand.length > 0
     && !me?.retired
     && (state.currentMotivation ?? 0) >= 1;
@@ -1069,6 +1107,7 @@ function updateUi(state: RoomState | null) {
   renderHand(state);
   renderLog(state);
   if (state.lastSkipped) showSkipToast(state.lastSkipped);
+  if (state.lastMulligan) showMulliganBanner(state.lastMulligan);
 
   // === Player avatars + card overlay: sequential / deferred ===
   // If this state contains a newly-played card, queue it. The worker pops one

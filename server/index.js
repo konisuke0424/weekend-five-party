@@ -37,7 +37,7 @@ const CARD_DEFS = {
   },
   collab_stream: {
     name: "コラボ配信",
-    text: "対象と自分のフォロワー+10万人。",
+    text: "対象のフォロワー数の10%を自分に加算。対象は減らない。",
     target: "opponent",
     cost: 2
   },
@@ -49,7 +49,7 @@ const CARD_DEFS = {
   },
   big_announcement: {
     name: "重大なお知らせ",
-    text: "1/2でフォロワー×1000。1/2でフォロワー÷1000。",
+    text: "1/2でフォロワー×1000。1/2でフォロワー÷100。100人以下なら引退。",
     target: "self",
     cost: 3
   },
@@ -61,25 +61,25 @@ const CARD_DEFS = {
   },
   expose: {
     name: "暴露",
-    text: "対象のフォロワーを半減させる。",
+    text: "対象のフォロワーを半減。50%で炎上も付与。",
     target: "opponent",
-    cost: 3
+    cost: 2
   },
   scandal: {
     name: "炎上",
     text: "対象を炎上状態にする。(炎上=毎ターン開始時に半減)",
     target: "opponent",
-    cost: 3
+    cost: 2
   },
   apology: {
     name: "謝罪",
-    text: "自分の炎上を回復。サイコロの目×1000フォロワー獲得。",
+    text: "自分の炎上を解除する。",
     target: "self",
     cost: 1
   },
   shield: {
     name: "鍵垢にする",
-    text: "次に受ける攻撃カード1回を無効化。3ターン持続。",
+    text: "次に受ける攻撃カード1回を無効化。次の自分のターン開始時まで持続。",
     target: "self",
     cost: 1
   },
@@ -103,7 +103,7 @@ const CARD_DEFS = {
   },
   industry_expose: {
     name: "業界の闇暴露",
-    text: "自分を含めた全員のフォロワー50%減。",
+    text: "自分以外全員のフォロワー20%減。50%で自分も炎上。",
     target: "none",
     cost: 3
   },
@@ -115,7 +115,7 @@ const CARD_DEFS = {
   },
   sponsorship: {
     name: "企業案件",
-    text: "フォロワー+1万人。",
+    text: "フォロワー+500人。次の自分のターン開始時にモチベ+1。",
     target: "self",
     cost: 2
   },
@@ -160,6 +160,28 @@ const cpuNames = ["CPUミナ", "CPUレン", "CPUカナ", "CPUソウ", "CPUユイ
 
 function repeat(cardKey, count) {
   return Array.from({ length: count }, () => cardKey);
+}
+
+// クライアント表示と一致させる: 1万以上は万・億・兆・京で短縮。
+function fmtFol(value) {
+  const sign = value < 0 ? "-" : "";
+  const abs = Math.abs(value);
+  const units = [
+    { v: 1e16, n: "京" },
+    { v: 1e12, n: "兆" },
+    { v: 1e8, n: "億" },
+    { v: 1e4, n: "万" },
+  ];
+  for (const u of units) {
+    if (abs >= u.v) {
+      const scaled = abs / u.v;
+      const shown = scaled >= 10
+        ? Math.floor(scaled).toString()
+        : (Math.floor(scaled * 10) / 10).toString();
+      return `${sign}${shown}${u.n}`;
+    }
+  }
+  return value.toLocaleString();
 }
 
 function shuffle(items) {
@@ -306,6 +328,7 @@ function publicRoom(room, viewerId) {
     winnerIds: room.winnerIds,
     lastPlayed: room.lastPlayed,
     lastSkipped: room.lastSkipped ?? null,
+    lastMulligan: room.lastMulligan ?? null,
     log: room.log,
     structuredLog: room.structuredLog ?? [],
     myHand: viewer ? viewer.hand.map(card => ({
@@ -478,7 +501,7 @@ function beginTurn(room) {
   if (player.antiTurns > 0 && !player.retired) {
     const before = player.followers;
     changeFollowers(player, Math.max(0, player.followers - 10000));
-    addLog(room, `${player.name} はアンチでフォロワー-${(before - player.followers).toLocaleString()}`, player.id);
+    addLog(room, `${player.name} はアンチでフォロワー-${fmtFol(before - player.followers)}`, player.id);
     retireIfNeeded(room, player);
     if (checkWin(room)) return;
   }
@@ -542,6 +565,7 @@ function startGame(room) {
   room.winnerIds = [];
   room.lastPlayed = null;
   room.lastSkipped = null;
+  room.lastMulligan = null;
   room.discardingPlayerId = null;
   room.discardCount = 0;
 
@@ -607,8 +631,8 @@ function playCard(room, player, card, targetId) {
       // インスタグラマー: x1.5 boost
       const actualBase = player.role === "インスタグラマー" ? Math.floor(base * 1.5) : base;
       const gained = applyGain(player, actualBase);
-      resolvedText = `サイコロ${dice} → +${gained.toLocaleString()}フォロワー。手札に残る。`;
-      addLog(room, `${player.name} は毎日配信(サイコロ${dice})で+${gained.toLocaleString()}人`, player.id);
+      resolvedText = `サイコロ${dice} → +${fmtFol(gained)}フォロワー。手札に残る。`;
+      addLog(room, `${player.name} は毎日配信(サイコロ${dice})で+${fmtFol(gained)}人`, player.id);
       break;
     }
     case "day_off": {
@@ -621,11 +645,12 @@ function playCard(room, player, card, targetId) {
     case "collab_stream": {
       const target = opponentTarget();
       // 鍵垢相手でも友好的なので無効化対象にしない（攻撃ではない）
-      const selfGain = applyGain(player, 100000);
-      const targetGain = applyGain(target, 100000);
+      // 対象のフォロワー数の10%を自分に加算。対象は減らない。
+      const transferred = Math.floor(target.followers * 0.1);
+      const selfGain = applyGain(player, transferred);
       addLog(
         room,
-        `${player.name} と ${target.name} がコラボ配信。双方+${selfGain.toLocaleString()}/${targetGain.toLocaleString()}人`,
+        `${player.name} は${target.name}とコラボ配信。${target.name}の10%(${fmtFol(transferred)})を自分に獲得→+${fmtFol(selfGain)}`,
         player.id,
         target.id
       );
@@ -649,7 +674,7 @@ function playCard(room, player, card, targetId) {
         player.burningTurns = 3;
         player.burningSourceId = null;
       }
-      addLog(room, `${player.name} は${target.name}になりすまし(フォロワー${diff >= 0 ? "+" : ""}${diff.toLocaleString()})${burned ? "/自分が炎上" : ""}`, player.id, target.id);
+      addLog(room, `${player.name} は${target.name}になりすまし(フォロワー${diff >= 0 ? "+" : ""}${fmtFol(diff)})${burned ? "/自分が炎上" : ""}`, player.id, target.id);
       retireIfNeeded(room, player);
       break;
     }
@@ -659,9 +684,13 @@ function playCard(room, player, card, targetId) {
         changeFollowers(player, player.followers * 1000);
         addLog(room, `${player.name} の重大なお知らせが大当たり(×1000)`, player.id);
       } else {
-        changeFollowers(player, Math.max(0, Math.floor(player.followers / 1000)));
-        addLog(room, `${player.name} の重大なお知らせが大外れ(÷1000)`, player.id);
-        retireIfNeeded(room, player);
+        changeFollowers(player, Math.max(0, Math.floor(player.followers / 100)));
+        addLog(room, `${player.name} の重大なお知らせが大外れ(÷100)`, player.id);
+        // 仕様: 100人以下なら引退
+        if (player.followers <= 100 && !player.retired) {
+          player.followers = 0;
+          retireIfNeeded(room, player);
+        }
       }
       break;
     }
@@ -680,7 +709,19 @@ function playCard(room, player, card, targetId) {
         break;
       }
       changeFollowers(target, Math.floor(target.followers / 2));
-      addLog(room, `${player.name} は${target.name}を暴露(フォロワー半減)`, player.id, target.id);
+      // 50% で炎上も付与
+      const ignites = Math.random() < 0.5;
+      if (ignites && !target.burning) {
+        target.burning = true;
+        target.burningTurns = 3;
+        target.burningSourceId = player.id;
+      }
+      addLog(
+        room,
+        `${player.name} は${target.name}を暴露(フォロワー半減)${ignites ? "/炎上付与" : ""}`,
+        player.id,
+        target.id
+      );
       retireIfNeeded(room, target);
       break;
     }
@@ -704,16 +745,21 @@ function playCard(room, player, card, targetId) {
       player.burning = false;
       player.burningTurns = 0;
       player.burningSourceId = null;
-      const dice = rollDice();
-      const gained = applyGain(player, dice * 1000);
-      resolvedText = `炎上回復。サイコロ${dice} → +${gained.toLocaleString()}フォロワー。`;
-      addLog(room, `${player.name} は謝罪${wasBurning ? "(炎上回復)" : ""}・+${gained.toLocaleString()}人`, player.id);
+      // v0.5 仕様: フォロワーの追加獲得はなし。純粋に炎上解除のみ。
+      if (wasBurning) {
+        resolvedText = `炎上を解除した。`;
+        addLog(room, `${player.name} は謝罪で炎上を解除`, player.id);
+      } else {
+        resolvedText = "しかし何も起こらなかった";
+        addLog(room, `${player.name} は謝罪したが炎上していなかった`, player.id);
+      }
       break;
     }
     case "shield": {
       player.shielded = true;
-      player.shieldTurns = 3;
-      addLog(room, `${player.name} は鍵垢にした(3ターン持続)`, player.id);
+      // v0.5 仕様: 次の自分のターン開始時まで。次ターン開始で1回デクリメント→解除。
+      player.shieldTurns = 1;
+      addLog(room, `${player.name} は鍵垢にした(次の自分のターン開始まで持続)`, player.id);
       break;
     }
     case "kusomaro": {
@@ -751,8 +797,8 @@ function playCard(room, player, card, targetId) {
     case "signature_topic": {
       if (Math.random() < 0.5) {
         const gained = applyGain(player, 1000000);
-        resolvedText = `渾身のネタが大ヒット → +${gained.toLocaleString()}フォロワー。`;
-        addLog(room, `${player.name} の渾身のネタが大ヒット(+${gained.toLocaleString()}人)`, player.id);
+        resolvedText = `渾身のネタが大ヒット → +${fmtFol(gained)}フォロワー。`;
+        addLog(room, `${player.name} の渾身のネタが大ヒット(+${fmtFol(gained)}人)`, player.id);
       } else {
         resolvedText = "しかし何も起こらなかった";
         addLog(room, `${player.name} の渾身のネタは外れ`, player.id);
@@ -760,22 +806,28 @@ function playCard(room, player, card, targetId) {
       break;
     }
     case "industry_expose": {
+      // v0.5 仕様: 自分以外全員のフォロワー20%減。50%で自分も炎上。
       const alive = getAlivePlayers(room);
       for (const p of alive) {
-        if (p.id === player.id) {
-          // 自分は鍵垢では守れない（仕様：自分も対象）
-          changeFollowers(p, Math.floor(p.followers / 2));
-        } else if (p.shielded) {
+        if (p.id === player.id) continue; // 自分は減らない
+        if (p.shielded) {
           p.shielded = false;
           p.shieldTurns = 0;
           addLog(room, `${p.name} は鍵垢で業界の闇暴露を防いだ`, player.id, p.id);
           continue;
-        } else {
-          changeFollowers(p, Math.floor(p.followers / 2));
         }
+        const newVal = Math.floor(p.followers * 0.8);
+        changeFollowers(p, newVal);
         retireIfNeeded(room, p);
       }
-      addLog(room, `${player.name} が業界の闇を暴露(全員50%減)`, player.id);
+      addLog(room, `${player.name} が業界の闇を暴露(自分以外20%減)`, player.id);
+      // 50%で自分も炎上
+      if (Math.random() < 0.5 && !player.burning) {
+        player.burning = true;
+        player.burningTurns = 3;
+        player.burningSourceId = null;
+        addLog(room, `${player.name} は業界の闇暴露で自分も炎上した`, player.id);
+      }
       if (checkWin(room)) return;
       break;
     }
@@ -794,8 +846,10 @@ function playCard(room, player, card, targetId) {
       break;
     }
     case "sponsorship": {
-      const gained = applyGain(player, 10000);
-      addLog(room, `${player.name} は企業案件で+${gained.toLocaleString()}人`, player.id);
+      // v0.5 仕様: フォロワー+500人。次の自分のターン開始時にモチベ+1。
+      const gained = applyGain(player, 500);
+      player.bonusMotivation = (player.bonusMotivation || 0) + 1;
+      addLog(room, `${player.name} は企業案件で+${fmtFol(gained)}人(次ターン開始時にモチベ+1)`, player.id);
       break;
     }
     case "trending": {
@@ -979,6 +1033,7 @@ io.on("connection", (socket) => {
       turnNumber: 0,
       winnerIds: [],
       lastPlayed: null,
+      lastMulligan: null,
       log: ["ルームを作成しました"],
       structuredLog: [{ text: "ルームを作成しました", subjectId: null, targetId: null }],
       createdAt: Date.now()
@@ -1041,6 +1096,7 @@ io.on("connection", (socket) => {
     room.winnerIds = [];
     room.lastPlayed = null;
     room.lastSkipped = null;
+    room.lastMulligan = null;
     room.log = ["ロビーに戻りました"];
     room.structuredLog = [{ text: "ロビーに戻りました", subjectId: null, targetId: null }];
     room.message = "友人を待っています";
@@ -1173,11 +1229,7 @@ io.on("connection", (socket) => {
       reply?.({ ok: false, error: "プレイできません" });
       return;
     }
-    if (player.mulliganedThisTurn) {
-      reply?.({ ok: false, error: "このターンは既にマリガン済みです" });
-      return;
-    }
-    // 仕様: マリガンはモチベ-1を消費する
+    // 仕様: マリガンはモチベ-1を消費する。回数制限なし（モチベが続く限り何回でも）
     if ((room.currentMotivation ?? 0) < 1) {
       reply?.({ ok: false, error: "モチベが足りません(マリガンは-1必要)" });
       return;
@@ -1204,9 +1256,16 @@ io.on("connection", (socket) => {
     // Shuffle back into deck and redraw
     room.deck = shuffle([...room.deck, ...returning]);
     const drawn = drawCards(room, player, returning.length);
-    player.mulliganedThisTurn = true;
+    player.mulliganedThisTurn = true; // 互換用フラグ(同ターン1回でもUI上ステート維持)。回数制限には使わない
     // モチベを-1消費
     room.currentMotivation = Math.max(0, (room.currentMotivation ?? 0) - 1);
+    // 全プレイヤー向けにマリガン通知を出すための lastMulligan を更新
+    room.lastMulligan = {
+      id: `${Date.now()}-${player.id}-mul`,
+      playerId: player.id,
+      playerName: player.name,
+      swapped: returning.length
+    };
     addLog(room, `${player.name} がマリガンで${returning.length}枚交換 (引いた${drawn.length}枚, モチベ-1)`, player.id);
     console.log(`[mulligan] OK: returned=${returning.length}, drawn=${drawn.length}, deckNow=${room.deck.length}, handNow=${player.hand.length}`);
     reply?.({ ok: true });
