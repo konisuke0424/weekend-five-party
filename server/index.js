@@ -25,7 +25,7 @@ const rooms = new Map();
 const CARD_DEFS = {
   daily_stream: {
     name: "毎日配信",
-    text: "サイコロの目×1000フォロワー獲得。使っても手札からなくならない。",
+    text: "サイコロの目×1万フォロワー獲得。使っても手札からなくならない。",
     target: "none",
     cost: 1
   },
@@ -37,7 +37,7 @@ const CARD_DEFS = {
   },
   collab_stream: {
     name: "コラボ配信",
-    text: "対象のフォロワー数の10%を自分に加算。対象は減らない。",
+    text: "対象と自分のフォロワー+10万人。",
     target: "opponent",
     cost: 2
   },
@@ -49,7 +49,7 @@ const CARD_DEFS = {
   },
   big_announcement: {
     name: "重大なお知らせ",
-    text: "1/2でフォロワー×1000。1/2でフォロワー÷100。100人以下なら引退。",
+    text: "1/2でフォロワー×1000。1/2でフォロワー÷1000。",
     target: "self",
     cost: 3
   },
@@ -61,25 +61,25 @@ const CARD_DEFS = {
   },
   expose: {
     name: "暴露",
-    text: "対象のフォロワーを半減。50%で炎上も付与。",
+    text: "対象のフォロワーを半減させる。",
     target: "opponent",
-    cost: 2
+    cost: 3
   },
   scandal: {
     name: "炎上",
     text: "対象を炎上状態にする。(炎上=毎ターン開始時に半減)",
     target: "opponent",
-    cost: 2
+    cost: 3
   },
   apology: {
     name: "謝罪",
-    text: "自分の炎上を解除する。",
+    text: "炎上・アンチ状態を回復。サイコロの目×1000フォロワー獲得。",
     target: "self",
     cost: 1
   },
   shield: {
     name: "鍵垢にする",
-    text: "次に受ける攻撃カード1回を無効化。次の自分のターン開始時まで持続。",
+    text: "次に受ける攻撃カード1回を無効化。3ターン持続。",
     target: "self",
     cost: 1
   },
@@ -103,7 +103,7 @@ const CARD_DEFS = {
   },
   industry_expose: {
     name: "業界の闇暴露",
-    text: "自分以外全員のフォロワー20%減。50%で自分も炎上。",
+    text: "自分を含めた全員のフォロワー50%減。",
     target: "none",
     cost: 3
   },
@@ -115,7 +115,7 @@ const CARD_DEFS = {
   },
   sponsorship: {
     name: "企業案件",
-    text: "フォロワー+500人。次の自分のターン開始時にモチベ+1。",
+    text: "フォロワー+10万人。",
     target: "self",
     cost: 2
   },
@@ -506,10 +506,9 @@ function beginTurn(room) {
     if (checkWin(room)) return;
   }
 
-  // モチベ設定（企業案件などのボーナス込み）
-  room.currentMotivation = MAX_MOTIVATION + (player.bonusMotivation || 0);
+  // v0.3/v0.5 仕様: モチベ最大値は MAX_MOTIVATION のみ（企業案件ボーナス・スキップ救済は廃止）
+  room.currentMotivation = MAX_MOTIVATION;
   room.turnMaxMotivation = room.currentMotivation;
-  player.bonusMotivation = 0;
   player.mulliganedThisTurn = false;
 
   // アイドル: draw 2 on turn start
@@ -627,7 +626,7 @@ function playCard(room, player, card, targetId) {
   switch (card.key) {
     case "daily_stream": {
       const dice = rollDice();
-      const base = dice * 1000;
+      const base = dice * 10000;
       // インスタグラマー: x1.5 boost
       const actualBase = player.role === "インスタグラマー" ? Math.floor(base * 1.5) : base;
       const gained = applyGain(player, actualBase);
@@ -645,12 +644,12 @@ function playCard(room, player, card, targetId) {
     case "collab_stream": {
       const target = opponentTarget();
       // 鍵垢相手でも友好的なので無効化対象にしない（攻撃ではない）
-      // 対象のフォロワー数の10%を自分に加算。対象は減らない。
-      const transferred = Math.floor(target.followers * 0.1);
-      const selfGain = applyGain(player, transferred);
+      // 対象と自分のフォロワー+10万人。
+      const selfGain = applyGain(player, 100000);
+      const targetGain = applyGain(target, 100000);
       addLog(
         room,
-        `${player.name} は${target.name}とコラボ配信。${target.name}の10%(${fmtFol(transferred)})を自分に獲得→+${fmtFol(selfGain)}`,
+        `${player.name} と ${target.name} がコラボ配信。双方+${fmtFol(selfGain)}/${fmtFol(targetGain)}人`,
         player.id,
         target.id
       );
@@ -684,13 +683,9 @@ function playCard(room, player, card, targetId) {
         changeFollowers(player, player.followers * 1000);
         addLog(room, `${player.name} の重大なお知らせが大当たり(×1000)`, player.id);
       } else {
-        changeFollowers(player, Math.max(0, Math.floor(player.followers / 100)));
-        addLog(room, `${player.name} の重大なお知らせが大外れ(÷100)`, player.id);
-        // 仕様: 100人以下なら引退
-        if (player.followers <= 100 && !player.retired) {
-          player.followers = 0;
-          retireIfNeeded(room, player);
-        }
+        changeFollowers(player, Math.max(0, Math.floor(player.followers / 1000)));
+        addLog(room, `${player.name} の重大なお知らせが大外れ(÷1000)`, player.id);
+        retireIfNeeded(room, player);
       }
       break;
     }
@@ -709,19 +704,7 @@ function playCard(room, player, card, targetId) {
         break;
       }
       changeFollowers(target, Math.floor(target.followers / 2));
-      // 50% で炎上も付与
-      const ignites = Math.random() < 0.5;
-      if (ignites && !target.burning) {
-        target.burning = true;
-        target.burningTurns = 3;
-        target.burningSourceId = player.id;
-      }
-      addLog(
-        room,
-        `${player.name} は${target.name}を暴露(フォロワー半減)${ignites ? "/炎上付与" : ""}`,
-        player.id,
-        target.id
-      );
+      addLog(room, `${player.name} は${target.name}を暴露(フォロワー半減)`, player.id, target.id);
       retireIfNeeded(room, target);
       break;
     }
@@ -742,24 +725,26 @@ function playCard(room, player, card, targetId) {
     }
     case "apology": {
       const wasBurning = player.burning;
+      const wasAnti = (player.antiTurns || 0) > 0;
       player.burning = false;
       player.burningTurns = 0;
       player.burningSourceId = null;
-      // v0.5 仕様: フォロワーの追加獲得はなし。純粋に炎上解除のみ。
-      if (wasBurning) {
-        resolvedText = `炎上を解除した。`;
-        addLog(room, `${player.name} は謝罪で炎上を解除`, player.id);
-      } else {
-        resolvedText = "しかし何も起こらなかった";
-        addLog(room, `${player.name} は謝罪したが炎上していなかった`, player.id);
-      }
+      player.antiTurns = 0;
+      const dice = rollDice();
+      const gained = applyGain(player, dice * 1000);
+      const cleared = [];
+      if (wasBurning) cleared.push("炎上");
+      if (wasAnti) cleared.push("アンチ");
+      const clearText = cleared.length > 0 ? `${cleared.join("・")}を解除` : "状態異常なし";
+      resolvedText = `${clearText}。サイコロ${dice} → +${fmtFol(gained)}フォロワー。`;
+      addLog(room, `${player.name} は謝罪(${clearText}, サイコロ${dice}で+${fmtFol(gained)}人)`, player.id);
       break;
     }
     case "shield": {
       player.shielded = true;
-      // v0.5 仕様: 次の自分のターン開始時まで。次ターン開始で1回デクリメント→解除。
-      player.shieldTurns = 1;
-      addLog(room, `${player.name} は鍵垢にした(次の自分のターン開始まで持続)`, player.id);
+      // v0.3 仕様: 3ターン持続。
+      player.shieldTurns = 3;
+      addLog(room, `${player.name} は鍵垢にした(3ターン持続)`, player.id);
       break;
     }
     case "kusomaro": {
@@ -806,28 +791,20 @@ function playCard(room, player, card, targetId) {
       break;
     }
     case "industry_expose": {
-      // v0.5 仕様: 自分以外全員のフォロワー20%減。50%で自分も炎上。
+      // v0.3 仕様: 自分を含めた全員のフォロワー50%減。
       const alive = getAlivePlayers(room);
       for (const p of alive) {
-        if (p.id === player.id) continue; // 自分は減らない
-        if (p.shielded) {
+        // 自分自身は鍵垢の影響なく必ず半減
+        if (p.id !== player.id && p.shielded) {
           p.shielded = false;
           p.shieldTurns = 0;
           addLog(room, `${p.name} は鍵垢で業界の闇暴露を防いだ`, player.id, p.id);
           continue;
         }
-        const newVal = Math.floor(p.followers * 0.8);
-        changeFollowers(p, newVal);
+        changeFollowers(p, Math.floor(p.followers / 2));
         retireIfNeeded(room, p);
       }
-      addLog(room, `${player.name} が業界の闇を暴露(自分以外20%減)`, player.id);
-      // 50%で自分も炎上
-      if (Math.random() < 0.5 && !player.burning) {
-        player.burning = true;
-        player.burningTurns = 3;
-        player.burningSourceId = null;
-        addLog(room, `${player.name} は業界の闇暴露で自分も炎上した`, player.id);
-      }
+      addLog(room, `${player.name} が業界の闇を暴露(自分含む全員50%減)`, player.id);
       if (checkWin(room)) return;
       break;
     }
@@ -846,10 +823,9 @@ function playCard(room, player, card, targetId) {
       break;
     }
     case "sponsorship": {
-      // v0.5 仕様: フォロワー+500人。次の自分のターン開始時にモチベ+1。
-      const gained = applyGain(player, 500);
-      player.bonusMotivation = (player.bonusMotivation || 0) + 1;
-      addLog(room, `${player.name} は企業案件で+${fmtFol(gained)}人(次ターン開始時にモチベ+1)`, player.id);
+      // v0.3 仕様: フォロワー+10万人。
+      const gained = applyGain(player, 100000);
+      addLog(room, `${player.name} は企業案件で+${fmtFol(gained)}人`, player.id);
       break;
     }
     case "trending": {
