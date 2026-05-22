@@ -1,0 +1,28 @@
+{
+  "name": "weekend-five-party",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "npx kill-port 3001 5173 5174 5175 5176 5177 5178 5179 5180 5181 5182 2>/dev/null; concurrently \"vite --host 0.0.0.0\" \"node server/index.js\"",
+    "build": "tsc && vite build",
+    "start": "node server/index.js"
+  },
+  "dependencies": {
+    "express": "^5.1.0",
+    "phaser": "^3.90.0",
+    "qrcode": "^1.5.4",
+    "socket.io": "^4.8.1",
+    "socket.io-client": "^4.8.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.21",
+    "@types/qrcode": "^1.5.5",
+    "concurrently": "^9.1.2",
+    "typescript": "^5.8.3",
+    "vite": "^6.3.5"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
