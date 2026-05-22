@@ -523,6 +523,7 @@ function beginTurn(room) {
   checkWin(room);
   if (player.isCpu && room.phase === "playing") {
     broadcast(room);
+    if (room.cpuTimer) clearTimeout(room.cpuTimer);
     room.cpuTimer = setTimeout(() => playCpuTurn(room), CPU_TURN_DELAY_MS);
   }
 }
@@ -536,6 +537,8 @@ function enforceHandLimit(room, player) {
 }
 
 function advanceTurn(room) {
+  // 前ターンの CPU タイマーを必ずクリア（古いタイマーが新しい currentIndex で発火するのを防ぐ）
+  if (room.cpuTimer) { clearTimeout(room.cpuTimer); room.cpuTimer = null; }
   if (checkWin(room)) return;
   const nextIndex = nextAliveIndex(room, room.currentIndex);
   if (nextIndex < 0) {
@@ -943,7 +946,14 @@ function chooseCpuCard(room, player) {
 function playCpuTurn(room) {
   if (room.phase !== "playing") return;
   const player = room.players[room.currentIndex];
-  if (!player?.isCpu || player.retired) return;
+  if (!player) return;
+  // 引退済みCPUの番が回ってきた場合（古いタイマーや競合状態の保険）はターンを進める
+  if (player.retired) {
+    advanceTurn(room);
+    broadcast(room);
+    return;
+  }
+  if (!player.isCpu) return;
 
   const choice = player.hand.length > 0 ? chooseCpuCard(room, player) : null;
   if (!choice) {
@@ -963,6 +973,12 @@ function playCpuTurn(room) {
     if (!isPersistent) room.discard.push(playedCard);
     room.currentMotivation -= getEffectiveCost(playedCard, player);
     if (checkWin(room)) {
+      broadcast(room);
+      return;
+    }
+    // 自分が引退した場合は motivation 関係なく即時ターン進行
+    if (player.retired) {
+      advanceTurn(room);
       broadcast(room);
       return;
     }
@@ -1164,7 +1180,8 @@ io.on("connection", (socket) => {
       playCard(room, player, card, targetId);
       if (!isPersistent) room.discard.push(card);
       room.currentMotivation -= effectiveCost;
-      if (!checkWin(room) && room.currentMotivation <= 0) {
+      // 自分が引退した場合も即時ターン進行
+      if (!checkWin(room) && (player.retired || room.currentMotivation <= 0)) {
         advanceTurn(room);
       }
       reply?.({ ok: true });
