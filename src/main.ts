@@ -993,17 +993,17 @@ function updateUi(state: RoomState | null) {
   const current = currentPlayer(state);
   const inLobby = state.phase === "lobby";
   const isFinished = state.phase === "finished";
-  const inGame = !inLobby && !isFinished;
+  // Game end stays on the game-screen — no transition to result-screen by request.
+  const inGame = !inLobby;
 
   lobbyScreen.classList.toggle("hidden", !inLobby);
   gameScreen.classList.toggle("hidden", !inGame);
-  resultScreen.classList.toggle("hidden", !isFinished);
+  resultScreen.classList.add("hidden");
   joinPanel.classList.toggle("hidden", Boolean(myId));
   roomPanel.classList.toggle("hidden", !myId);
 
   if (isFinished) {
-    renderResultScreen(state);
-    // Game-screen UI bits (overlays, skip toasts, etc.) shouldn't bleed onto result.
+    // Game ended: clear transient overlays so the final board reads cleanly.
     hideCardOverlay();
     hideCardEffectBanner();
   }
@@ -1056,11 +1056,12 @@ function updateUi(state: RoomState | null) {
   endTurnButton.classList.toggle("hidden", !myTurn || mulliganMode);
 
   // Mulligan button: shown on my turn, hand has cards, not yet used this turn,
-  // and we're not currently in mulligan selection mode.
+  // not retired, and we have at least 1 motivation (mulligan now costs -1).
   const canMulligan = myTurn
     && !state.myMulliganedThisTurn
     && state.myHand.length > 0
-    && !me?.retired;
+    && !me?.retired
+    && (state.currentMotivation ?? 0) >= 1;
   mulliganButton.classList.toggle("hidden", !canMulligan || mulliganMode);
 
   renderInvite(state.code);

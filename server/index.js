@@ -432,10 +432,8 @@ function beginTurn(room) {
     }
   }
 
-  // スキップ救済: 前ターンが存在し0枚だった場合のみモチベ+1（初回ターンは除外）
-  const skipBonus = player.currentTurnCardCount === 0 ? 1 : 0;
-
-  player.currentTurnCardCount = 0;  // 0 = このターン未使用（次回スキップ救済の判定に使う）
+  // (旧スキップ救済 +1 仕様は廃止。currentTurnCardCount は他用途で残す。)
+  player.currentTurnCardCount = 0;
 
   if (player.skipTurns > 0) {
     player.skipTurns -= 1;
@@ -485,12 +483,11 @@ function beginTurn(room) {
     if (checkWin(room)) return;
   }
 
-  // モチベ設定（スキップ救済・企業案件ボーナス込み）
-  room.currentMotivation = MAX_MOTIVATION + skipBonus + (player.bonusMotivation || 0);
+  // モチベ設定（企業案件などのボーナス込み）
+  room.currentMotivation = MAX_MOTIVATION + (player.bonusMotivation || 0);
   room.turnMaxMotivation = room.currentMotivation;
   player.bonusMotivation = 0;
   player.mulliganedThisTurn = false;
-  if (skipBonus) addLog(room, `${player.name} は前ターン休んだためモチベ+1`, player.id);
 
   // アイドル: draw 2 on turn start
   const drawCount = player.role === "アイドル" ? 2 : 1;
@@ -1180,6 +1177,11 @@ io.on("connection", (socket) => {
       reply?.({ ok: false, error: "このターンは既にマリガン済みです" });
       return;
     }
+    // 仕様: マリガンはモチベ-1を消費する
+    if ((room.currentMotivation ?? 0) < 1) {
+      reply?.({ ok: false, error: "モチベが足りません(マリガンは-1必要)" });
+      return;
+    }
     if (!Array.isArray(cardIds) || cardIds.length === 0) {
       reply?.({ ok: false, error: "カードを選択してください" });
       return;
@@ -1203,7 +1205,9 @@ io.on("connection", (socket) => {
     room.deck = shuffle([...room.deck, ...returning]);
     const drawn = drawCards(room, player, returning.length);
     player.mulliganedThisTurn = true;
-    addLog(room, `${player.name} がマリガンで${returning.length}枚交換 (引いた${drawn.length}枚)`, player.id);
+    // モチベを-1消費
+    room.currentMotivation = Math.max(0, (room.currentMotivation ?? 0) - 1);
+    addLog(room, `${player.name} がマリガンで${returning.length}枚交換 (引いた${drawn.length}枚, モチベ-1)`, player.id);
     console.log(`[mulligan] OK: returned=${returning.length}, drawn=${drawn.length}, deckNow=${room.deck.length}, handNow=${player.hand.length}`);
     reply?.({ ok: true });
     broadcast(room);
