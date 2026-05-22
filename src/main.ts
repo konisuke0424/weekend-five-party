@@ -1031,19 +1031,18 @@ function updateUi(state: RoomState | null) {
   const current = currentPlayer(state);
   const inLobby = state.phase === "lobby";
   const isFinished = state.phase === "finished";
-  // Game end stays on the game-screen — no transition to result-screen by request.
   const inGame = !inLobby;
 
   lobbyScreen.classList.toggle("hidden", !inLobby);
-  gameScreen.classList.toggle("hidden", !inGame);
-  resultScreen.classList.add("hidden");
+  gameScreen.classList.toggle("hidden", !inGame || isFinished);
+  resultScreen.classList.toggle("hidden", !isFinished);
   joinPanel.classList.toggle("hidden", Boolean(myId));
   roomPanel.classList.toggle("hidden", !myId);
 
   if (isFinished) {
-    // Game ended: clear transient overlays so the final board reads cleanly.
     hideCardOverlay();
     hideCardEffectBanner();
+    renderResultScreen(state);
   }
 
   startButton.hidden = state.hostId !== myId || state.phase === "playing";
