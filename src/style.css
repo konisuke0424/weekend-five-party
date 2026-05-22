@@ -1527,6 +1527,14 @@ body {
   font-weight: 800;
   color: var(--follower-color, var(--accent-cyan));
 }
+.result-actions {
+  display: flex;
+  justify-content: center;
+  padding: 8px 0 4px;
+}
+.result-actions .btn-primary {
+  min-width: 200px;
+}
 
 /* ============================================================
    View switcher tabs (mockup only)
@@ -1660,8 +1668,12 @@ body {
 .played-card-new {
   /* Height-driven so it never overflows. Width is computed from aspect-ratio. */
   --pc-h: clamp(220px, 44svh, 380px);
+  /* Shift the whole card stack down a touch so a 2-line effect-text banner
+     at the top can never graze the card's top edge. */
+  --pc-offset-y: 18px;
   position: absolute;
-  top: 50%; left: 50%;
+  top: calc(50% + var(--pc-offset-y));
+  left: 50%;
   transform: translate(-50%, -50%);
   height: var(--pc-h);
   aspect-ratio: 3 / 5;
@@ -1692,9 +1704,10 @@ body {
 }
 .played-by-label {
   position: absolute;
-  top: 50%; left: 50%;
+  top: calc(50% + 18px); left: 50%;
   --pc-h: clamp(220px, 46svh, 380px);
-  /* Sits just below the card body so the top effect banner doesn't cover it. */
+  /* Sits just below the card body so the top effect banner doesn't cover it.
+     Matches the --pc-offset-y on .played-card-new so labels stay glued to the card. */
   transform: translate(-50%, calc(-50% + var(--pc-h) / 2 + 14px));
   background: linear-gradient(180deg, #ff5460, #c93545);
   color: white;
@@ -1710,9 +1723,9 @@ body {
 }
 .played-target-label {
   position: absolute;
-  top: 50%; left: 50%;
+  top: calc(50% + 18px); left: 50%;
   --pc-h: clamp(220px, 46svh, 380px);
-  /* Stacks below the playedBy badge. */
+  /* Stacks below the playedBy badge. Same 18px shift as the card itself. */
   transform: translate(-50%, calc(-50% + var(--pc-h) / 2 + 52px));
   background: rgba(8, 12, 22, 0.95);
   border: 1px solid var(--accent-pink);

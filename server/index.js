@@ -639,6 +639,7 @@ function playCard(room, player, card, targetId) {
       if (target.shielded) {
         target.shielded = false;
         target.shieldTurns = 0;
+        resolvedText = "しかし何も起こらなかった";
         addLog(room, `${target.name} は鍵垢でなりすましを防いだ`, player.id, target.id);
         break;
       }
@@ -677,6 +678,7 @@ function playCard(room, player, card, targetId) {
       if (target.shielded) {
         target.shielded = false;
         target.shieldTurns = 0;
+        resolvedText = "しかし何も起こらなかった";
         addLog(room, `${target.name} は鍵垢で暴露を防いだ`, player.id, target.id);
         break;
       }
@@ -690,6 +692,7 @@ function playCard(room, player, card, targetId) {
       if (target.shielded) {
         target.shielded = false;
         target.shieldTurns = 0;
+        resolvedText = "しかし何も起こらなかった";
         addLog(room, `${target.name} は鍵垢で炎上を防いだ`, player.id, target.id);
         break;
       }
@@ -721,6 +724,7 @@ function playCard(room, player, card, targetId) {
       if (target.shielded) {
         target.shielded = false;
         target.shieldTurns = 0;
+        resolvedText = "しかし何も起こらなかった";
         addLog(room, `${target.name} は鍵垢でくそマロを防いだ`, player.id, target.id);
         break;
       }
@@ -753,7 +757,7 @@ function playCard(room, player, card, targetId) {
         resolvedText = `渾身のネタが大ヒット → +${gained.toLocaleString()}フォロワー。`;
         addLog(room, `${player.name} の渾身のネタが大ヒット(+${gained.toLocaleString()}人)`, player.id);
       } else {
-        resolvedText = `渾身のネタは外れ。`;
+        resolvedText = "しかし何も起こらなかった";
         addLog(room, `${player.name} の渾身のネタは外れ`, player.id);
       }
       break;
@@ -783,6 +787,7 @@ function playCard(room, player, card, targetId) {
       if (target.shielded) {
         target.shielded = false;
         target.shieldTurns = 0;
+        resolvedText = "しかし何も起こらなかった";
         addLog(room, `${target.name} は鍵垢でアンチを防いだ`, player.id, target.id);
         break;
       }
@@ -804,7 +809,7 @@ function playCard(room, player, card, targetId) {
     case "premium_subscription": {
       if (!player.subscribed) {
         addLog(room, `${player.name} はプレミアム化を試みたがサブスク未開始で不発`, player.id);
-        resolvedText = "サブスク未開始のため不発。";
+        resolvedText = "しかし何も起こらなかった";
         break;
       }
       player.premiumSubscribed = true;
@@ -1018,6 +1023,52 @@ io.on("connection", (socket) => {
     const room = getRoomForSocket(socket);
     if (!room || room.hostId !== socket.id) return;
     startGame(room);
+  });
+
+  socket.on("game:returnToLobby", () => {
+    const room = getRoomForSocket(socket);
+    if (!room || room.hostId !== socket.id) return;
+    // Only meaningful from finished. (Also tolerate "lobby" no-op.)
+    if (room.phase !== "finished" && room.phase !== "lobby") return;
+    // Drop CPU fillers so the host can re-arrange seats. Real players stay.
+    room.players = room.players.filter((p) => !p.isCpu);
+    if (room.cpuTimer) { clearTimeout(room.cpuTimer); room.cpuTimer = null; }
+    room.phase = "lobby";
+    room.deck = [];
+    room.discard = [];
+    room.currentIndex = 0;
+    room.currentPlayerId = null;
+    room.currentMotivation = MAX_MOTIVATION;
+    room.turnMaxMotivation = MAX_MOTIVATION;
+    room.turnNumber = 0;
+    room.winnerIds = [];
+    room.lastPlayed = null;
+    room.lastSkipped = null;
+    room.log = ["ロビーに戻りました"];
+    room.structuredLog = [{ text: "ロビーに戻りました", subjectId: null, targetId: null }];
+    room.message = "友人を待っています";
+    for (const p of room.players) {
+      p.hand = [];
+      p.followers = INITIAL_FOLLOWERS;
+      p.role = null;
+      p.retired = false;
+      p.burning = false;
+      p.burningTurns = 0;
+      p.burningSourceId = null;
+      p.skipTurns = 0;
+      p.gainBoosts = 0;
+      p.trendingBoosts = 0;
+      p.shielded = false;
+      p.shieldTurns = 0;
+      p.subscribed = false;
+      p.premiumSubscribed = false;
+      p.antiTurns = 0;
+      p.bonusMotivation = 0;
+      p.mulliganedThisTurn = false;
+      p.currentTurnCardCount = -1;
+      p.followerDelta = 0;
+    }
+    broadcast(room);
   });
 
   socket.on("game:startWithCpu", () => {

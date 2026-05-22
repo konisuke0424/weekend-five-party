@@ -283,6 +283,27 @@ app.innerHTML = `
       </section>
     </section>
 
+    <!-- ========== Result Screen ========== -->
+    <section id="resultScreen" class="result-screen hidden">
+      <header class="result-banner">
+        <p class="eyebrow">GAME OVER</p>
+        <h1 id="resultTitle">RESULT</h1>
+      </header>
+
+      <div id="resultWinner" class="result-winner">
+        <div class="winner-avatar"><img id="winnerAvatar" alt="" /></div>
+        <div id="winnerName" class="winner-name"></div>
+        <div id="winnerFollowers" class="winner-followers">0</div>
+        <div class="winner-label">FOLLOWERS</div>
+      </div>
+
+      <div id="resultList" class="result-list"></div>
+
+      <div class="result-actions">
+        <button id="returnToLobbyButton" class="btn-primary">ロビーに戻る</button>
+      </div>
+    </section>
+
     <!-- ========== Menu modal (log) ========== -->
     <section id="menuModal" class="modal hidden" aria-modal="true" role="dialog">
       <div class="modal-backdrop" id="modalBackdrop"></div>
@@ -342,6 +363,13 @@ const connection = document.querySelector<HTMLDivElement>("#connection")!;
 const connectionText = connection.querySelector<HTMLSpanElement>("span:last-child")!;
 const lobbyScreen = document.querySelector<HTMLDivElement>("#lobbyScreen")!;
 const gameScreen = document.querySelector<HTMLDivElement>("#gameScreen")!;
+const resultScreen = document.querySelector<HTMLElement>("#resultScreen")!;
+const resultTitle = document.querySelector<HTMLHeadingElement>("#resultTitle")!;
+const winnerAvatar = document.querySelector<HTMLImageElement>("#winnerAvatar")!;
+const winnerName = document.querySelector<HTMLDivElement>("#winnerName")!;
+const winnerFollowers = document.querySelector<HTMLDivElement>("#winnerFollowers")!;
+const resultList = document.querySelector<HTMLDivElement>("#resultList")!;
+const returnToLobbyButton = document.querySelector<HTMLButtonElement>("#returnToLobbyButton")!;
 const joinPanel = document.querySelector<HTMLDivElement>("#joinPanel")!;
 const roomPanel = document.querySelector<HTMLDivElement>("#roomPanel")!;
 const menuButton = document.querySelector<HTMLButtonElement>("#menuButton")!;
@@ -644,6 +672,50 @@ function renderPlayers(state: RoomState) {
   applyChangeEffects(state);
 }
 
+function renderResultScreen(state: RoomState) {
+  // Sort: alive first by followers desc, then retired players at the end.
+  const ranked = state.players.slice().sort((a, b) => {
+    if (a.retired !== b.retired) return a.retired ? 1 : -1;
+    return b.followers - a.followers;
+  });
+
+  const winnerIds = new Set(state.winnerIds);
+  const winners = ranked.filter(p => winnerIds.has(p.id));
+  // Hero block: first winner (or the top player as a fallback).
+  const hero = winners[0] ?? ranked[0] ?? null;
+  if (hero) {
+    const idx = playerIndex(state, hero);
+    winnerAvatar.src = avatarSrc(idx);
+    winnerName.textContent = hero.name;
+    winnerFollowers.textContent = formatFollowers(hero.followers);
+    resultTitle.textContent = winners.length > 1 ? "DRAW" : "VICTORY";
+  } else {
+    winnerAvatar.removeAttribute("src");
+    winnerName.textContent = "—";
+    winnerFollowers.textContent = "0";
+    resultTitle.textContent = "GAME OVER";
+  }
+
+  resultList.innerHTML = ranked.map((p, i) => {
+    const rank = i + 1;
+    const idx = playerIndex(state, p);
+    const ring = ringFor(idx);
+    const rankCls = rank === 1 ? "first" : rank === 2 ? "second" : rank === 3 ? "third" : "";
+    const retiredTag = p.retired ? ` <span class="badge retired">引退</span>` : "";
+    return `
+      <div class="result-row ${rankCls}" style="--ring-color:${ring.ring};--follower-color:${ring.followers};">
+        <div class="rank">${rank}</div>
+        <div class="avatar"><img src="${avatarSrc(idx)}" alt="" /></div>
+        <div class="name">${escapeHtml(p.name)}${retiredTag}</div>
+        <div class="followers">${formatFollowers(p.followers)}</div>
+      </div>
+    `;
+  }).join("");
+
+  // Only the host gets to send the room back to the lobby.
+  returnToLobbyButton.hidden = state.hostId !== myId;
+}
+
 function renderLobbyPlayers(state: RoomState) {
   const slots: (Player | null)[] = state.players.slice();
   while (slots.length < state.maxPlayers) slots.push(null);
@@ -919,12 +991,22 @@ function updateUi(state: RoomState | null) {
 
   const me = myPlayer(state);
   const current = currentPlayer(state);
-  const inGame = state.phase !== "lobby";
+  const inLobby = state.phase === "lobby";
+  const isFinished = state.phase === "finished";
+  const inGame = !inLobby && !isFinished;
 
-  lobbyScreen.classList.toggle("hidden", inGame);
+  lobbyScreen.classList.toggle("hidden", !inLobby);
   gameScreen.classList.toggle("hidden", !inGame);
+  resultScreen.classList.toggle("hidden", !isFinished);
   joinPanel.classList.toggle("hidden", Boolean(myId));
   roomPanel.classList.toggle("hidden", !myId);
+
+  if (isFinished) {
+    renderResultScreen(state);
+    // Game-screen UI bits (overlays, skip toasts, etc.) shouldn't bleed onto result.
+    hideCardOverlay();
+    hideCardEffectBanner();
+  }
 
   startButton.hidden = state.hostId !== myId || state.phase === "playing";
   cpuStartButton.hidden = state.hostId !== myId || state.phase === "playing";
@@ -1098,6 +1180,7 @@ avatarInput.addEventListener("change", async () => {
 
 startButton.addEventListener("click", () => socket.emit("game:start"));
 cpuStartButton.addEventListener("click", () => socket.emit("game:startWithCpu"));
+returnToLobbyButton.addEventListener("click", () => socket.emit("game:returnToLobby"));
 endTurnButton.addEventListener("click", () => {
   socket.emit("game:endTurn");
   if ((window as any).SFX) (window as any).SFX.end?.();
