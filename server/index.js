@@ -34,7 +34,9 @@ const CPU_TURN_DELAY_MS = 2700;
 const MAX_MOTIVATION = 3;
 const HAND_LIMIT = 7;
 const IDLE_TIMEOUT_MS = 60000;
+const IDLE_WARNING_AT_MS = IDLE_TIMEOUT_MS - 10000; // 残り10秒で警告 (= 50秒経過時点)
 const IDLE_RETIRE_STRIKES = 2;
+const BURNING_DAMAGE_DELAY_MS = 1500; // 直前のカード演出と炎上ダメージ処理を分離する遅延
 const COLORS = ["#ff5a5f", "#00a6ed", "#f5b700", "#7bc950", "#a855f7"];
 const ROLES = ["炎上系", "アイドル", "知識系", "インスタグラマー", "エンタメ系", "レビュー系"];
 const rooms = new Map();
@@ -253,6 +255,7 @@ function makePlayer(socket, name) {
     followerDelta: 0,
     bonusMotivation: 0,
     idleTimer: null,
+    idleWarningTimer: null,
     idleStrikes: 0
   };
 }
@@ -284,6 +287,7 @@ function makeCpuPlayer(index) {
     followerDelta: 0,
     bonusMotivation: 0,
     idleTimer: null,
+    idleWarningTimer: null,
     idleStrikes: 0
   };
 }
@@ -351,6 +355,8 @@ function publicRoom(room, viewerId) {
     lastPlayed: room.lastPlayed,
     lastSkipped: room.lastSkipped ?? null,
     lastMulligan: room.lastMulligan ?? null,
+    lastBurningDamage: room.lastBurningDamage ?? null,
+    lastIdleWarning: room.lastIdleWarning ?? null,
     log: room.log,
     structuredLog: room.structuredLog ?? [],
     myHand: viewer ? viewer.hand.map(card => ({
@@ -428,6 +434,10 @@ function clearIdleTimer(player) {
     clearTimeout(player.idleTimer);
     player.idleTimer = null;
   }
+  if (player.idleWarningTimer) {
+    clearTimeout(player.idleWarningTimer);
+    player.idleWarningTimer = null;
+  }
 }
 
 function clearAllIdleTimers(room) {
@@ -437,7 +447,25 @@ function clearAllIdleTimers(room) {
 function startIdleTimer(room, player) {
   clearIdleTimer(player);
   if (player.isCpu || player.retired) return;
+  // 警告: 残り10秒を切った時点で broadcast (lastIdleWarning)
+  player.idleWarningTimer = setTimeout(() => emitIdleWarning(room, player), IDLE_WARNING_AT_MS);
+  // 自動ターン終了
   player.idleTimer = setTimeout(() => onIdleTimeout(room, player), IDLE_TIMEOUT_MS);
+}
+
+function emitIdleWarning(room, player) {
+  player.idleWarningTimer = null;
+  if (!room || !rooms.has(room.code)) return;
+  if (room.phase !== "playing") return;
+  if (room.currentPlayerId !== player.id || player.retired) return;
+  room.lastIdleWarning = {
+    id: `${Date.now()}-${player.id}-warn`,
+    playerId: player.id,
+    playerName: player.name,
+    secondsLeft: 10
+  };
+  addLog(room, `${player.name} の制限時間あと10秒`, player.id);
+  broadcast(room);
 }
 
 function onActiveAction(room, player) {
@@ -486,6 +514,7 @@ function checkWin(room) {
     addLog(room, room.message);
     clearAllIdleTimers(room);
     if (room.cpuTimer) { clearTimeout(room.cpuTimer); room.cpuTimer = null; }
+    if (room.beginTurnTimer) { clearTimeout(room.beginTurnTimer); room.beginTurnTimer = null; }
     return true;
   }
 
@@ -501,6 +530,7 @@ function checkWin(room) {
     addLog(room, room.message);
     clearAllIdleTimers(room);
     if (room.cpuTimer) { clearTimeout(room.cpuTimer); room.cpuTimer = null; }
+    if (room.beginTurnTimer) { clearTimeout(room.beginTurnTimer); room.beginTurnTimer = null; }
     return true;
   }
   return false;
@@ -554,7 +584,35 @@ function beginTurn(room) {
     return;
   }
 
+  // 炎上中: 直前のカード演出と分離するため、ターン開始 (state1: ダメージ前) を呼び出し元の
+  // broadcast で送り、BURNING_DAMAGE_DELAY_MS 後に applyTurnStartEffects (state2: ダメージ + ドロー
+  // + モチベ reset) を別 broadcast で送る。
   if (player.burning) {
+    room.phase = "playing";
+    room.message = `${player.name} のターン`;
+    if (room.beginTurnTimer) clearTimeout(room.beginTurnTimer);
+    room.beginTurnTimer = setTimeout(() => {
+      room.beginTurnTimer = null;
+      if (!rooms.has(room.code) || room.phase !== "playing") return;
+      if (room.currentPlayerId !== player.id) return;
+      applyTurnStartEffects(room, player, true);
+      broadcast(room);
+    }, BURNING_DAMAGE_DELAY_MS);
+    return;
+  }
+
+  applyTurnStartEffects(room, player, false);
+}
+
+// ターン開始のうち、フォロワー変動・ドロー・モチベ reset を担当。
+// 炎上ダメージは applyBurning フラグで制御 (beginTurn の遅延 setTimeout からのみ true)。
+function applyTurnStartEffects(room, player, applyBurning) {
+  if (player.retired) {
+    advanceTurn(room);
+    return;
+  }
+
+  if (applyBurning && player.burning) {
     // 炎上: ターン開始時にフォロワー 1/10 (90%減)
     // 炎上系ロールはダメージ下限 200 (1/10 でも 200 を下回らない)
     const reduced = Math.floor(player.followers / 10);
@@ -563,6 +621,12 @@ function beginTurn(room) {
       : reduced;
     changeFollowers(player, damaged);
     addLog(room, `${player.name} は炎上でフォロワー1/10`, player.id);
+    // クライアントが「炎上ダメージ」を独立した演出として処理できるよう broadcast info
+    room.lastBurningDamage = {
+      id: `${Date.now()}-${player.id}-burn`,
+      playerId: player.id,
+      playerName: player.name
+    };
     player.burningTurns -= 1;
     if (player.burningTurns <= 0) {
       player.burning = false;
@@ -571,7 +635,6 @@ function beginTurn(room) {
     }
     retireIfNeeded(room, player);
     if (checkWin(room)) return;
-    // 炎上ダメージで current player が引退した場合、即座に次へ
     if (player.retired) {
       advanceTurn(room);
       return;
@@ -611,12 +674,10 @@ function beginTurn(room) {
   if (drawn.length > 0) addLog(room, `${player.name} が${drawn.length}枚ドロー`, player.id);
   enforceHandLimit(room, player);
 
-
   room.phase = "playing";
   room.message = `${player.name} のターン`;
   if (checkWin(room)) return;
   if (player.isCpu && room.phase === "playing") {
-    broadcast(room);
     if (room.cpuTimer) clearTimeout(room.cpuTimer);
     room.cpuTimer = setTimeout(() => playCpuTurn(room), CPU_TURN_DELAY_MS);
   } else if (!player.isCpu && room.phase === "playing" && !player.retired) {
@@ -636,6 +697,8 @@ function enforceHandLimit(room, player) {
 function advanceTurn(room) {
   // 前ターンの CPU タイマーを必ずクリア（古いタイマーが新しい currentIndex で発火するのを防ぐ）
   if (room.cpuTimer) { clearTimeout(room.cpuTimer); room.cpuTimer = null; }
+  // ターン開始遅延 (炎上ダメージ待ち) のタイマーもキャンセル
+  if (room.beginTurnTimer) { clearTimeout(room.beginTurnTimer); room.beginTurnTimer = null; }
   // 前ターンの人間プレイヤーの無操作タイマーもクリア
   const prevPlayer = room.players[room.currentIndex];
   if (prevPlayer) clearIdleTimer(prevPlayer);
@@ -670,6 +733,8 @@ function startGame(room) {
   room.lastPlayed = null;
   room.lastSkipped = null;
   room.lastMulligan = null;
+  room.lastBurningDamage = null;
+  room.lastIdleWarning = null;
   room.discardingPlayerId = null;
   room.discardCount = 0;
 
@@ -1182,6 +1247,7 @@ io.on("connection", (socket) => {
     clearAllIdleTimers(room);
     room.players = room.players.filter((p) => !p.isCpu);
     if (room.cpuTimer) { clearTimeout(room.cpuTimer); room.cpuTimer = null; }
+    if (room.beginTurnTimer) { clearTimeout(room.beginTurnTimer); room.beginTurnTimer = null; }
     room.phase = "lobby";
     room.deck = [];
     room.discard = [];
@@ -1194,6 +1260,8 @@ io.on("connection", (socket) => {
     room.lastPlayed = null;
     room.lastSkipped = null;
     room.lastMulligan = null;
+    room.lastBurningDamage = null;
+    room.lastIdleWarning = null;
     room.log = ["ロビーに戻りました"];
     room.structuredLog = [{ text: "ロビーに戻りました", subjectId: null, targetId: null }];
     room.message = "友人を待っています";
@@ -1259,6 +1327,10 @@ io.on("connection", (socket) => {
       reply?.({ ok: false, error: "あなたのターンではありません" });
       return;
     }
+    if (room.beginTurnTimer) {
+      reply?.({ ok: false, error: "ターン開始処理中です" });
+      return;
+    }
 
     const player = room.players.find((candidate) => candidate.id === socket.id);
     if (!player || player.retired) {
@@ -1309,6 +1381,7 @@ io.on("connection", (socket) => {
     const room = getRoomForSocket(socket);
     if (!room || room.phase !== "playing") return;
     if (room.currentPlayerId !== socket.id) return;
+    if (room.beginTurnTimer) return; // ターン開始処理中はスキップ
     const player = room.players.find((p) => p.id === socket.id);
     if (player) onActiveAction(room, player);
     advanceTurn(room);
@@ -1328,6 +1401,10 @@ io.on("connection", (socket) => {
     }
     if (room.currentPlayerId !== socket.id) {
       reply?.({ ok: false, error: "あなたのターンではありません" });
+      return;
+    }
+    if (room.beginTurnTimer) {
+      reply?.({ ok: false, error: "ターン開始処理中です" });
       return;
     }
     const player = room.players.find((p) => p.id === socket.id);
@@ -1397,6 +1474,7 @@ io.on("connection", (socket) => {
     if (room.players.length === 0) {
       clearAllIdleTimers(room);
       if (room.cpuTimer) { clearTimeout(room.cpuTimer); room.cpuTimer = null; }
+      if (room.beginTurnTimer) { clearTimeout(room.beginTurnTimer); room.beginTurnTimer = null; }
       rooms.delete(room.code);
       return;
     }

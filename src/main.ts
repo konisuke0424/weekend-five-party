@@ -39,6 +39,19 @@ type LastMulligan = {
   swapped: number;
 };
 
+type LastBurningDamage = {
+  id: string;
+  playerId: string;
+  playerName: string;
+};
+
+type LastIdleWarning = {
+  id: string;
+  playerId: string;
+  playerName: string;
+  secondsLeft: number;
+};
+
 type Player = {
   id: string;
   name: string;
@@ -79,6 +92,8 @@ type RoomState = {
   lastPlayed: LastPlayed | null;
   lastSkipped: LastSkipped | null;
   lastMulligan: LastMulligan | null;
+  lastBurningDamage: LastBurningDamage | null;
+  lastIdleWarning: LastIdleWarning | null;
   log: string[];
   structuredLog: Array<{ text: string; subjectId: string | null; targetId: string | null }>;
   myHand: Card[];
@@ -359,13 +374,19 @@ let lastShownSkipId: string | null = null;
 let lastShownMulliganId: string | null = null;
 let skipToastTimer: number | undefined;
 
-// Sequential play queue: each new lastPlayed.id is queued; the worker shows
-// the overlay (2s) then advances the player-render state (animations fire).
-// Lets the user actually follow rapid CPU bursts.
-const playQueue: RoomState[] = [];
+// Sequential play queue. Entries are tagged so card plays and turn-start
+// burning damage events get their own animation slot (the user complaint:
+// "炎上ダメージとカード効果が同タイミング" — separate them).
+type PlayQueueEntry =
+  | { kind: "play"; state: RoomState }
+  | { kind: "burn"; state: RoomState };
+const playQueue: PlayQueueEntry[] = [];
 let processingPlayQueue = false;
-let queuedPlayIds: string | null = null;       // tail tracker: highest enqueued id
+let queuedPlayIds: string | null = null;       // tail tracker: highest enqueued play id
+let queuedBurnIds: string | null = null;       // tail tracker: highest enqueued burning-damage id
 let displayedPlayState: RoomState | null = null; // last state rendered into the players area
+let lastShownBurningId: string | null = null;
+let lastShownIdleWarningId: string | null = null;
 let logFilterId: string | null = null;
 
 const connection = document.querySelector<HTMLDivElement>("#connection")!;
@@ -1002,6 +1023,44 @@ function showSkipToast(skip: LastSkipped) {
   }, 2000);
 }
 
+function showBurningBanner(burn: LastBurningDamage) {
+  if (burn.id === lastShownBurningId) return;
+  lastShownBurningId = burn.id;
+  // Reuse the existing card-effect-banner styling.
+  showCardEffectBanner("🔥 炎上ダメージ", `${burn.playerName} のフォロワー 1/10`, {
+    durationMs: 2600
+  });
+}
+
+function showIdleWarningToast(warn: LastIdleWarning) {
+  if (warn.id === lastShownIdleWarningId) return;
+  lastShownIdleWarningId = warn.id;
+  const isMe = warn.playerId === myId;
+  const headline = isMe ? "あなた" : warn.playerName;
+  const reason = isMe
+    ? `残り${warn.secondsLeft}秒で自動ターン終了`
+    : `${warn.playerName} の制限時間 残り${warn.secondsLeft}秒`;
+  // Reuse skip-toast UI with an "idle-warning" modifier for styling hooks.
+  window.clearTimeout(skipToastTimer);
+  const meCls = isMe ? " for-me" : "";
+  skipToast.innerHTML = `
+    <div class="skip-toast-inner idle-warning${meCls}">
+      <div class="skip-toast-icon">⏰</div>
+      <div class="skip-toast-text">
+        <div class="skip-toast-name">${escapeHtml(headline)}</div>
+        <div class="skip-toast-reason">${escapeHtml(reason)}</div>
+      </div>
+    </div>
+  `;
+  skipToast.classList.remove("hidden");
+  void skipToast.offsetWidth;
+  skipToast.classList.add("showing");
+  skipToastTimer = window.setTimeout(() => {
+    skipToast.classList.remove("showing");
+    window.setTimeout(() => skipToast.classList.add("hidden"), 250);
+  }, isMe ? 4000 : 2500);
+}
+
 // LastPlayed only carries cardName/cardText. We need the card key for image lookup.
 // Map by cardName (Japanese) → key.
 const NAME_TO_KEY: Record<string, string> = {
@@ -1112,23 +1171,34 @@ function updateUi(state: RoomState | null) {
   renderLog(state);
   if (state.lastSkipped) showSkipToast(state.lastSkipped);
   if (state.lastMulligan) showMulliganBanner(state.lastMulligan);
+  if (state.lastIdleWarning) showIdleWarningToast(state.lastIdleWarning);
 
   // === Player avatars + card overlay: sequential / deferred ===
-  // If this state contains a newly-played card, queue it. The worker pops one
-  // at a time: shows the overlay for 2s, then re-renders players (which lets
-  // applyChangeEffects fire follower-delta animations against the previous
-  // frozen snapshot). This way the user always has 2s of "what just happened"
-  // before the avatars react.
+  // If this state contains a newly-played card OR a turn-start burning damage,
+  // queue each as its own animation slot. The worker pops one at a time and
+  // re-renders players so applyChangeEffects fires follower-delta animations
+  // against the previous frozen snapshot. Card effects and burning damage are
+  // therefore visually separated.
   const playId = state.lastPlayed?.id ?? null;
+  const burnId = state.lastBurningDamage?.id ?? null;
+  let enqueuedAny = false;
   if (playId && playId !== queuedPlayIds) {
     queuedPlayIds = playId;
-    playQueue.push(state);
+    playQueue.push({ kind: "play", state });
+    enqueuedAny = true;
+  }
+  if (burnId && burnId !== queuedBurnIds) {
+    queuedBurnIds = burnId;
+    playQueue.push({ kind: "burn", state });
+    enqueuedAny = true;
+  }
+  if (enqueuedAny) {
     // While queued, keep the players frozen at the last displayed snapshot.
     if (displayedPlayState) renderPlayers(displayedPlayState);
     else { displayedPlayState = state; renderPlayers(state); }
     if (!processingPlayQueue) processPlayQueue();
   } else if (!processingPlayQueue) {
-    // Idle and no new card → render immediately, catch displayedPlayState up.
+    // Idle and no new event → render immediately, catch displayedPlayState up.
     displayedPlayState = state;
     renderPlayers(state);
   } else {
@@ -1139,6 +1209,7 @@ function updateUi(state: RoomState | null) {
   if (state.phase !== "playing" && playQueue.length > 0) {
     playQueue.length = 0;
     queuedPlayIds = null;
+    queuedBurnIds = null;
     displayedPlayState = state;
     renderPlayers(state);
   }
@@ -1148,15 +1219,24 @@ async function processPlayQueue() {
   processingPlayQueue = true;
   try {
     while (playQueue.length > 0) {
-      const target = playQueue.shift()!;
-      // Show the overlay for the played card (4s — doubled per v0.6).
-      showPlayedReveal(target);
-      await delay(4000);
-      // Render players with the new state — animations fire via applyChangeEffects.
-      displayedPlayState = target;
-      renderPlayers(target);
-      // Breather so the boost/damage animation has air before the next overlay.
-      await delay(1200);
+      const entry = playQueue.shift()!;
+      if (entry.kind === "play") {
+        // Card play: 4s reveal + render + 1.2s breather.
+        showPlayedReveal(entry.state);
+        await delay(4000);
+        displayedPlayState = entry.state;
+        renderPlayers(entry.state);
+        await delay(1200);
+      } else {
+        // Turn-start burning damage: dedicated banner first, then render so the
+        // follower delta animation is visually disjoint from the prior play.
+        const burn = entry.state.lastBurningDamage;
+        if (burn) showBurningBanner(burn);
+        await delay(1400);
+        displayedPlayState = entry.state;
+        renderPlayers(entry.state);
+        await delay(1200);
+      }
     }
   } finally {
     processingPlayQueue = false;

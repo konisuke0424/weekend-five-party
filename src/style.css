@@ -1646,6 +1646,29 @@ body {
   letter-spacing: 0.05em;
 }
 
+/* Idle-timeout warning variant (残り10秒) — red theme so users notice */
+.skip-toast-inner.idle-warning {
+  background: linear-gradient(180deg, rgba(60, 14, 14, 0.96), rgba(28, 6, 6, 0.96));
+  border-color: var(--accent-red);
+  box-shadow:
+    0 0 40px rgba(239, 68, 68, 0.6),
+    0 18px 50px rgba(0,0,0,0.7);
+}
+.skip-toast-inner.idle-warning .skip-toast-icon {
+  filter: drop-shadow(0 0 10px rgba(239, 68, 68, 0.8));
+}
+.skip-toast-inner.idle-warning .skip-toast-name {
+  color: #fca5a5;
+  text-shadow: 0 0 12px rgba(239, 68, 68, 0.6);
+}
+.skip-toast-inner.idle-warning.for-me {
+  animation: idle-warning-pulse 0.7s ease-in-out infinite alternate;
+}
+@keyframes idle-warning-pulse {
+  from { box-shadow: 0 0 30px rgba(239, 68, 68, 0.5), 0 18px 50px rgba(0,0,0,0.7); }
+  to   { box-shadow: 0 0 56px rgba(239, 68, 68, 0.85), 0 18px 50px rgba(0,0,0,0.7); }
+}
+
 /* ============================================================
    Played card overlay (3s show)
    ============================================================ */
