@@ -517,7 +517,11 @@ function currentPlayer(state: RoomState) {
 }
 
 function isMyTurn(state: RoomState) {
-  return state.phase === "playing" && state.currentPlayerId === myId;
+  if (state.phase !== "playing") return false;
+  if (state.currentPlayerId !== myId) return false;
+  const me = state.players.find((p) => p.id === myId);
+  if (me?.retired) return false;
+  return true;
 }
 
 function playerIndex(state: RoomState, player: Player) {
@@ -531,6 +535,7 @@ function statusBadges(player: Player, state: RoomState) {
   // Role is not displayed — role effects are disabled in v0.3.
   void state;
   const out: string[] = [];
+  if (player.burning) out.push(`<span class="badge burning">炎上</span>`);
   if (player.skipTurns > 0) out.push(`<span class="badge rest">休み${player.skipTurns}</span>`);
   const totalGain = (player.gainBoosts ?? 0) * 10 + (player.trendingBoosts ?? 0) * 30;
   if (totalGain > 0) out.push(`<span class="badge boost">+${totalGain}%</span>`);
@@ -897,7 +902,7 @@ function showCardOverlay(opts: OverlayOpts) {
 
   // Non-persistent (real play): the user's tap-preview session is done.
   activePreviewCardId = null;
-  const duration = opts.durationMs ?? 3000;
+  const duration = opts.durationMs ?? 6000;
   revealTimer = window.setTimeout(() => hideCardOverlay({ keepBanner: true }), duration);
 }
 
@@ -928,7 +933,7 @@ function showCardEffectBanner(
   void cardEffectBanner.offsetWidth;
   cardEffectBanner.classList.add("showing");
   if (opts.persistent) return;
-  const duration = opts.durationMs ?? 3500;
+  const duration = opts.durationMs ?? 7000;
   effectBannerTimer = window.setTimeout(() => hideCardEffectBanner(), duration);
 }
 
@@ -947,17 +952,17 @@ function showPlayedReveal(state: RoomState) {
   if (!played) return;
   lastRevealId = played.id;
 
-  // Big card image: 2s. Effect banner persists ~3.5s so it spans the follower
-  // delta animations that fire after renderPlayers (which itself runs +2s after
-  // the play). Total: card image 2s + delta anim ~1.9s ≈ 3.9s.
+  // Big card image: 4s (doubled from 2s for readability per v0.6 spec).
+  // Effect banner persists ~7.6s so it spans follower-delta animations that
+  // fire after renderPlayers (which itself runs +4s after the play).
   showCardOverlay({
     cardKey: played.cardKey || extractKeyFromName(played) || "daily_stream",
     playerName: played.playerName,
     targetName: played.targetName,
-    durationMs: 2000,
+    durationMs: 4000,
     cardName: played.cardName,
     cardText: played.cardText,
-    bannerDurationMs: 3800
+    bannerDurationMs: 7600
   });
 }
 
@@ -1055,7 +1060,7 @@ function updateUi(state: RoomState | null) {
     : "ルームを作成または参加";
 
   deckCount.textContent = String(state.deckCount);
-  turnNumber.textContent = state.phase === "lobby" ? "--" : `T${state.turnNumber}`;
+  turnNumber.textContent = state.phase === "lobby" ? "--" : String(state.turnNumber);
   topbarGameInfo.classList.toggle("hidden", state.phase === "lobby");
 
   if (state.phase === "finished") {
@@ -1144,14 +1149,14 @@ async function processPlayQueue() {
   try {
     while (playQueue.length > 0) {
       const target = playQueue.shift()!;
-      // Show the overlay for the played card (2s).
+      // Show the overlay for the played card (4s — doubled per v0.6).
       showPlayedReveal(target);
-      await delay(2000);
+      await delay(4000);
       // Render players with the new state — animations fire via applyChangeEffects.
       displayedPlayState = target;
       renderPlayers(target);
-      // Small breather so the boost/damage animation has air before the next overlay.
-      await delay(600);
+      // Breather so the boost/damage animation has air before the next overlay.
+      await delay(1200);
     }
   } finally {
     processingPlayQueue = false;

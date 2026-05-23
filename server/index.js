@@ -27,12 +27,14 @@ const io = new Server(server, { cors: { origin: true } });
 
 const PORT = Number(process.env.PORT || 3001);
 const ROOM_SIZE = 6;
-const INITIAL_FOLLOWERS = 1000;
-const DECK_SIZE = 80;
+const INITIAL_FOLLOWERS = 50000;
+const DECK_PER_PLAYER = 15;
 const HAND_SIZE = 5;
 const CPU_TURN_DELAY_MS = 2700;
 const MAX_MOTIVATION = 3;
 const HAND_LIMIT = 7;
+const IDLE_TIMEOUT_MS = 60000;
+const IDLE_RETIRE_STRIKES = 2;
 const COLORS = ["#ff5a5f", "#00a6ed", "#f5b700", "#7bc950", "#a855f7"];
 const ROLES = ["炎上系", "アイドル", "知識系", "インスタグラマー", "エンタメ系", "レビュー系"];
 const rooms = new Map();
@@ -59,13 +61,13 @@ const CARD_DEFS = {
   },
   impersonate: {
     name: "なりすまし",
-    text: "対象と同数のフォロワーになる。1/2で自分が炎上。(炎上=毎ターン開始時に半減)",
+    text: "対象と同数のフォロワーになる。1/2で自分が炎上。(炎上=毎ターン開始時に1/10)",
     target: "opponent",
     cost: 3
   },
   big_announcement: {
     name: "重大なお知らせ",
-    text: "1/2でフォロワー×1000。1/2でフォロワー÷1000。",
+    text: "1/2でフォロワー×10。1/2でフォロワー÷10。",
     target: "self",
     cost: 3
   },
@@ -83,13 +85,13 @@ const CARD_DEFS = {
   },
   scandal: {
     name: "炎上",
-    text: "対象を炎上状態にする。(炎上=毎ターン開始時に半減)",
+    text: "対象を炎上状態にする。(炎上=毎ターン開始時に1/10)",
     target: "opponent",
     cost: 3
   },
   apology: {
     name: "謝罪",
-    text: "炎上・アンチ状態を回復。サイコロの目×1000フォロワー獲得。",
+    text: "炎上・アンチ状態を回復。サイコロの目×10000フォロワー獲得。",
     target: "self",
     cost: 1
   },
@@ -249,7 +251,9 @@ function makePlayer(socket, name) {
     antiTurns: 0,
     currentTurnCardCount: -1,
     followerDelta: 0,
-    bonusMotivation: 0
+    bonusMotivation: 0,
+    idleTimer: null,
+    idleStrikes: 0
   };
 }
 
@@ -278,7 +282,9 @@ function makeCpuPlayer(index) {
     antiTurns: 0,
     currentTurnCardCount: -1,
     followerDelta: 0,
-    bonusMotivation: 0
+    bonusMotivation: 0,
+    idleTimer: null,
+    idleStrikes: 0
   };
 }
 
@@ -413,7 +419,57 @@ function retireIfNeeded(room, player) {
       room.deck = shuffle(room.deck);
     }
     addLog(room, `${player.name} は引退した`, player.id);
+    clearIdleTimer(player);
   }
+}
+
+function clearIdleTimer(player) {
+  if (player.idleTimer) {
+    clearTimeout(player.idleTimer);
+    player.idleTimer = null;
+  }
+}
+
+function clearAllIdleTimers(room) {
+  for (const p of room.players) clearIdleTimer(p);
+}
+
+function startIdleTimer(room, player) {
+  clearIdleTimer(player);
+  if (player.isCpu || player.retired) return;
+  player.idleTimer = setTimeout(() => onIdleTimeout(room, player), IDLE_TIMEOUT_MS);
+}
+
+function onActiveAction(room, player) {
+  if (!player) return;
+  player.idleStrikes = 0;
+  clearIdleTimer(player);
+}
+
+function onIdleTimeout(room, player) {
+  if (!room || !rooms.has(room.code)) return;
+  if (room.phase !== "playing") return;
+  if (room.currentPlayerId !== player.id) return;
+  if (player.retired) return;
+  player.idleStrikes = (player.idleStrikes || 0) + 1;
+  addLog(
+    room,
+    `${player.name} は60秒無操作で自動ターン終了 (${player.idleStrikes}/${IDLE_RETIRE_STRIKES})`,
+    player.id
+  );
+  if (player.idleStrikes >= IDLE_RETIRE_STRIKES) {
+    addLog(room, `${player.name} は連続無操作で引退`, player.id);
+    player.followers = 0;
+    player.retired = true;
+    if (player.hand.length > 0) {
+      room.deck.push(...player.hand);
+      player.hand = [];
+      room.deck = shuffle(room.deck);
+    }
+  }
+  clearIdleTimer(player);
+  advanceTurn(room);
+  broadcast(room);
 }
 
 function getAlivePlayers(room) {
@@ -428,6 +484,8 @@ function checkWin(room) {
     room.winnerIds = alive.map((player) => player.id);
     room.message = alive[0] ? `${alive[0].name} の勝利` : "全員引退";
     addLog(room, room.message);
+    clearAllIdleTimers(room);
+    if (room.cpuTimer) { clearTimeout(room.cpuTimer); room.cpuTimer = null; }
     return true;
   }
 
@@ -441,6 +499,8 @@ function checkWin(room) {
       : "同点勝利";
     addLog(room, "デッキがなくなった");
     addLog(room, room.message);
+    clearAllIdleTimers(room);
+    if (room.cpuTimer) { clearTimeout(room.cpuTimer); room.cpuTimer = null; }
     return true;
   }
   return false;
@@ -458,6 +518,13 @@ function beginTurn(room) {
   if (checkWin(room)) return;
 
   const player = room.players[room.currentIndex];
+  // Safety: if the chosen player is somehow retired, advance immediately.
+  // nextAliveIndex should prevent this, but defensive layer against the
+  // retire-skip regression that brought us here in the first place.
+  if (player.retired) {
+    advanceTurn(room);
+    return;
+  }
   room.currentPlayerId = player.id;
   room.turnNumber += 1;
   for (const p of room.players) p.followerDelta = 0;
@@ -488,12 +555,14 @@ function beginTurn(room) {
   }
 
   if (player.burning) {
-    // 炎上系: damage floor at 200
+    // 炎上: ターン開始時にフォロワー 1/10 (90%減)
+    // 炎上系ロールはダメージ下限 200 (1/10 でも 200 を下回らない)
+    const reduced = Math.floor(player.followers / 10);
     const damaged = player.role === "炎上系"
-      ? Math.max(200, Math.floor(player.followers / 2))
-      : Math.floor(player.followers / 2);
+      ? Math.max(200, reduced)
+      : reduced;
     changeFollowers(player, damaged);
-    addLog(room, `${player.name} は炎上でフォロワー半減`, player.id);
+    addLog(room, `${player.name} は炎上でフォロワー1/10`, player.id);
     player.burningTurns -= 1;
     if (player.burningTurns <= 0) {
       player.burning = false;
@@ -502,6 +571,11 @@ function beginTurn(room) {
     }
     retireIfNeeded(room, player);
     if (checkWin(room)) return;
+    // 炎上ダメージで current player が引退した場合、即座に次へ
+    if (player.retired) {
+      advanceTurn(room);
+      return;
+    }
   }
 
   // サブスク状態: 毎ターン開始時にフォロワー+10000。プレミアム時は+100000（上書き）。
@@ -520,6 +594,10 @@ function beginTurn(room) {
     addLog(room, `${player.name} はアンチでフォロワー-${fmtFol(before - player.followers)}`, player.id);
     retireIfNeeded(room, player);
     if (checkWin(room)) return;
+    if (player.retired) {
+      advanceTurn(room);
+      return;
+    }
   }
 
   // v0.3/v0.5 仕様: モチベ最大値は MAX_MOTIVATION のみ（企業案件ボーナス・スキップ救済は廃止）
@@ -536,11 +614,14 @@ function beginTurn(room) {
 
   room.phase = "playing";
   room.message = `${player.name} のターン`;
-  checkWin(room);
+  if (checkWin(room)) return;
   if (player.isCpu && room.phase === "playing") {
     broadcast(room);
     if (room.cpuTimer) clearTimeout(room.cpuTimer);
     room.cpuTimer = setTimeout(() => playCpuTurn(room), CPU_TURN_DELAY_MS);
+  } else if (!player.isCpu && room.phase === "playing" && !player.retired) {
+    // 人間プレイヤー: 60秒の無操作タイマー開始 (2連続で引退)
+    startIdleTimer(room, player);
   }
 }
 
@@ -555,6 +636,9 @@ function enforceHandLimit(room, player) {
 function advanceTurn(room) {
   // 前ターンの CPU タイマーを必ずクリア（古いタイマーが新しい currentIndex で発火するのを防ぐ）
   if (room.cpuTimer) { clearTimeout(room.cpuTimer); room.cpuTimer = null; }
+  // 前ターンの人間プレイヤーの無操作タイマーもクリア
+  const prevPlayer = room.players[room.currentIndex];
+  if (prevPlayer) clearIdleTimer(prevPlayer);
   if (checkWin(room)) return;
   const nextIndex = nextAliveIndex(room, room.currentIndex);
   if (nextIndex < 0) {
@@ -573,7 +657,9 @@ function startGame(room) {
   }
 
   const roleOrder = shuffle(ROLES);
-  const selectedDeck = shuffle(CARD_POOL).slice(0, DECK_SIZE).map(createCard);
+  // デッキサイズ = プレイヤー人数 (CPU 含む) × 15
+  const deckTarget = Math.min(CARD_POOL.length, room.players.length * DECK_PER_PLAYER);
+  const selectedDeck = shuffle(CARD_POOL).slice(0, deckTarget).map(createCard);
   room.deck = selectedDeck;
   room.discard = [];
   room.log = [];
@@ -606,6 +692,8 @@ function startGame(room) {
     player.currentTurnCardCount = -1;
     player.bonusMotivation = 0;
     player.mulliganedThisTurn = false;
+    player.idleStrikes = 0;
+    clearIdleTimer(player);
     // 毎日配信は「初手」として全プレイヤーに必ず配る（仕様 v0.3）
     player.hand.push(createCard("daily_stream", index));
     drawCards(room, player, HAND_SIZE - 1);
@@ -699,11 +787,11 @@ function playCard(room, player, card, targetId) {
     case "big_announcement": {
       const roll = Math.random();
       if (roll < 0.5) {
-        changeFollowers(player, player.followers * 1000);
-        addLog(room, `${player.name} の重大なお知らせが大当たり(×1000)`, player.id);
+        changeFollowers(player, player.followers * 10);
+        addLog(room, `${player.name} の重大なお知らせが大当たり(×10)`, player.id);
       } else {
-        changeFollowers(player, Math.max(0, Math.floor(player.followers / 1000)));
-        addLog(room, `${player.name} の重大なお知らせが大外れ(÷1000)`, player.id);
+        changeFollowers(player, Math.max(0, Math.floor(player.followers / 10)));
+        addLog(room, `${player.name} の重大なお知らせが大外れ(÷10)`, player.id);
         retireIfNeeded(room, player);
       }
       break;
@@ -750,7 +838,7 @@ function playCard(room, player, card, targetId) {
       player.burningSourceId = null;
       player.antiTurns = 0;
       const dice = rollDice();
-      const gained = applyGain(player, dice * 1000);
+      const gained = applyGain(player, dice * 10000);
       const cleared = [];
       if (wasBurning) cleared.push("炎上");
       if (wasAnti) cleared.push("アンチ");
@@ -1091,6 +1179,7 @@ io.on("connection", (socket) => {
     // Only meaningful from finished. (Also tolerate "lobby" no-op.)
     if (room.phase !== "finished" && room.phase !== "lobby") return;
     // Drop CPU fillers so the host can re-arrange seats. Real players stay.
+    clearAllIdleTimers(room);
     room.players = room.players.filter((p) => !p.isCpu);
     if (room.cpuTimer) { clearTimeout(room.cpuTimer); room.cpuTimer = null; }
     room.phase = "lobby";
@@ -1128,6 +1217,7 @@ io.on("connection", (socket) => {
       p.mulliganedThisTurn = false;
       p.currentTurnCardCount = -1;
       p.followerDelta = 0;
+      p.idleStrikes = 0;
     }
     broadcast(room);
   });
@@ -1189,6 +1279,8 @@ io.on("connection", (socket) => {
       return;
     }
 
+    onActiveAction(room, player);
+
     // 毎日配信は使っても手札に残る（仕様 v0.3）
     const isPersistent = card.key === "daily_stream";
     if (!isPersistent) player.hand.splice(cardIndex, 1);
@@ -1199,6 +1291,9 @@ io.on("connection", (socket) => {
       // 自分が引退した場合も即時ターン進行
       if (!checkWin(room) && (player.retired || room.currentMotivation <= 0)) {
         advanceTurn(room);
+      } else if (room.phase === "playing" && !player.isCpu && room.currentPlayerId === player.id) {
+        // ターンが続く場合は無操作タイマーを再起動
+        startIdleTimer(room, player);
       }
       reply?.({ ok: true });
       broadcast(room);
@@ -1214,6 +1309,8 @@ io.on("connection", (socket) => {
     const room = getRoomForSocket(socket);
     if (!room || room.phase !== "playing") return;
     if (room.currentPlayerId !== socket.id) return;
+    const player = room.players.find((p) => p.id === socket.id);
+    if (player) onActiveAction(room, player);
     advanceTurn(room);
     broadcast(room);
   });
@@ -1238,6 +1335,7 @@ io.on("connection", (socket) => {
       reply?.({ ok: false, error: "プレイできません" });
       return;
     }
+    onActiveAction(room, player);
     // 仕様: マリガンはモチベ-1を消費する。回数制限なし（モチベが続く限り何回でも）
     if ((room.currentMotivation ?? 0) < 1) {
       reply?.({ ok: false, error: "モチベが足りません(マリガンは-1必要)" });
@@ -1277,6 +1375,9 @@ io.on("connection", (socket) => {
     };
     addLog(room, `${player.name} がマリガンで${returning.length}枚交換 (引いた${drawn.length}枚, モチベ-1)`, player.id);
     console.log(`[mulligan] OK: returned=${returning.length}, drawn=${drawn.length}, deckNow=${room.deck.length}, handNow=${player.hand.length}`);
+    if (room.phase === "playing" && room.currentPlayerId === player.id) {
+      startIdleTimer(room, player);
+    }
     reply?.({ ok: true });
     broadcast(room);
     } catch (err) {
@@ -1288,10 +1389,14 @@ io.on("connection", (socket) => {
   socket.on("room:leave", () => {
     const room = getRoomForSocket(socket);
     if (!room) return;
+    const leaving = room.players.find((player) => player.id === socket.id);
+    if (leaving) clearIdleTimer(leaving);
     room.players = room.players.filter((player) => player.id !== socket.id);
     socket.leave(room.code);
     socket.data.roomCode = null;
     if (room.players.length === 0) {
+      clearAllIdleTimers(room);
+      if (room.cpuTimer) { clearTimeout(room.cpuTimer); room.cpuTimer = null; }
       rooms.delete(room.code);
       return;
     }
