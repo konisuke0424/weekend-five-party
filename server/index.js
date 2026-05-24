@@ -839,13 +839,14 @@ function playCard(room, player, card, targetId) {
       const before = player.followers;
       changeFollowers(player, target.followers);
       const diff = player.followers - before;
-      const burned = Math.random() < 0.5;
+      const roll = Math.random();
+      const burned = roll < 0.5;
       if (burned) {
         player.burning = true;
         player.burningTurns = 3;
         player.burningSourceId = null;
       }
-      addLog(room, `${player.name} は${target.name}になりすまし(フォロワー${diff >= 0 ? "+" : ""}${fmtFol(diff)})${burned ? "/自分が炎上" : ""}`, player.id, target.id);
+      addLog(room, `${player.name} は${target.name}になりすまし(フォロワー${diff >= 0 ? "+" : ""}${fmtFol(diff)}, roll=${roll.toFixed(3)})${burned ? "/自分が炎上" : ""}`, player.id, target.id);
       retireIfNeeded(room, player);
       break;
     }
@@ -853,10 +854,10 @@ function playCard(room, player, card, targetId) {
       const roll = Math.random();
       if (roll < 0.5) {
         changeFollowers(player, player.followers * 10);
-        addLog(room, `${player.name} の重大なお知らせが大当たり(×10)`, player.id);
+        addLog(room, `${player.name} の重大なお知らせが大当たり (×10, roll=${roll.toFixed(3)})`, player.id);
       } else {
         changeFollowers(player, Math.max(0, Math.floor(player.followers / 10)));
-        addLog(room, `${player.name} の重大なお知らせが大外れ(÷10)`, player.id);
+        addLog(room, `${player.name} の重大なお知らせが大外れ (÷10, roll=${roll.toFixed(3)})`, player.id);
         retireIfNeeded(room, player);
       }
       break;
@@ -952,13 +953,16 @@ function playCard(room, player, card, targetId) {
       break;
     }
     case "signature_topic": {
-      if (Math.random() < 0.5) {
+      // Diagnostic: log the raw roll so 「100% 外れる」と疑われたときに後追い検証できるようにする。
+      // (コードは Math.random() < 0.5 なので統計的には 50/50。)
+      const roll = Math.random();
+      if (roll < 0.5) {
         const gained = applyGain(player, 1000000);
         resolvedText = `渾身のネタが大ヒット → +${fmtFol(gained)}フォロワー。`;
-        addLog(room, `${player.name} の渾身のネタが大ヒット(+${fmtFol(gained)}人)`, player.id);
+        addLog(room, `${player.name} の渾身のネタが大ヒット (roll=${roll.toFixed(3)}, +${fmtFol(gained)}人)`, player.id);
       } else {
         resolvedText = "しかし何も起こらなかった";
-        addLog(room, `${player.name} の渾身のネタは外れ`, player.id);
+        addLog(room, `${player.name} の渾身のネタは外れ (roll=${roll.toFixed(3)})`, player.id);
       }
       break;
     }
