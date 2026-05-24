@@ -2108,6 +2108,50 @@ body {
 }
 .icon-button:hover { border-color: var(--accent-cyan); color: var(--accent-cyan); }
 
+.modal-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.bgm-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: rgba(8, 12, 22, 0.7);
+  border: 1px solid var(--panel-border);
+  color: var(--text);
+  border-radius: 8px;
+  padding: 6px 10px;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: border-color 0.18s, color 0.18s, background 0.18s;
+}
+.bgm-toggle .bgm-icon { font-size: 14px; line-height: 1; }
+.bgm-toggle .bgm-label { letter-spacing: 0.05em; }
+.bgm-toggle .bgm-state {
+  font-size: 10px;
+  font-weight: 800;
+  padding: 1px 6px;
+  border-radius: 999px;
+  border: 1px solid currentColor;
+  letter-spacing: 0.06em;
+}
+.bgm-toggle:not(.muted) {
+  border-color: var(--accent-cyan);
+  color: var(--accent-cyan);
+}
+.bgm-toggle.muted {
+  opacity: 0.7;
+  color: var(--text-mute);
+}
+.bgm-toggle.muted .bgm-icon { filter: grayscale(1); }
+.bgm-toggle:hover {
+  border-color: var(--accent-gold);
+  color: var(--accent-gold);
+}
+
 .log-tabs {
   display: flex;
   gap: 4px;

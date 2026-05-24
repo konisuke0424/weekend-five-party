@@ -110,6 +110,123 @@
   };
 
   window.SFX = SFX;
+
+  // ============================================================
+  // BGM: procedural ambient loop (no asset file needed)
+  //   - 4-chord progression (Am - F - C - G), 4 seconds per chord, 16s loop.
+  //   - Soft triangle + sine oscillators routed through a low-pass filter
+  //     so it sounds like a slow pad rather than a chiptune.
+  //   - Tied to a master gain we can fade in / out and mute.
+  //   - Mute state persisted in localStorage so it survives reload.
+  // ============================================================
+  const BGM_PROGRESSION = [
+    // [root, third, fifth, octave] in Hz
+    [220.00, 261.63, 329.63, 440.00], // A minor
+    [174.61, 220.00, 261.63, 349.23], // F major
+    [130.81, 164.81, 196.00, 261.63], // C major
+    [196.00, 246.94, 293.66, 392.00]  // G major
+  ];
+  const BGM_CHORD_SEC = 4.0;
+  const BGM_LOOP_SEC = BGM_PROGRESSION.length * BGM_CHORD_SEC;
+  const BGM_MASTER_VOL = 0.06; // intentionally subtle so it never overpowers SFX
+
+  let bgmMaster = null;
+  let bgmTimer = null;
+  let bgmRunning = false;
+  let bgmMuted = false;
+  let bgmListeners = [];
+
+  try { bgmMuted = localStorage.getItem("igame.bgm.muted") === "1"; } catch (_) {}
+
+  function notifyBgmListeners() {
+    for (const fn of bgmListeners) { try { fn(); } catch (_) {} }
+  }
+
+  function bgmPlayChord(ac, freqs, t0, dur) {
+    const g = ac.createGain();
+    g.connect(bgmMaster);
+    g.gain.setValueAtTime(0, t0);
+    g.gain.linearRampToValueAtTime(0.55, t0 + 0.6);
+    g.gain.linearRampToValueAtTime(0.45, t0 + dur * 0.6);
+    g.gain.linearRampToValueAtTime(0, t0 + dur);
+
+    freqs.forEach((f, i) => {
+      const o = ac.createOscillator();
+      o.type = i === 0 ? "triangle" : "sine";
+      o.frequency.value = f;
+      // Slight detune on upper voices for warmth.
+      if (i >= 2) o.detune.value = (i - 2) * 6;
+      const filt = ac.createBiquadFilter();
+      filt.type = "lowpass";
+      filt.frequency.value = 1100;
+      filt.Q.value = 0.7;
+      o.connect(filt);
+      filt.connect(g);
+      o.start(t0);
+      o.stop(t0 + dur + 0.1);
+    });
+  }
+
+  function bgmScheduleLoop(ac, loopStartAt) {
+    for (let i = 0; i < BGM_PROGRESSION.length; i++) {
+      bgmPlayChord(ac, BGM_PROGRESSION[i], loopStartAt + i * BGM_CHORD_SEC, BGM_CHORD_SEC);
+    }
+    // Re-arm the next loop slightly before the current one ends so chords
+    // overlap a hair and we never get an audible seam.
+    const msUntilNext = (BGM_LOOP_SEC - 0.15) * 1000;
+    bgmTimer = setTimeout(() => {
+      if (bgmRunning) bgmScheduleLoop(ac, loopStartAt + BGM_LOOP_SEC);
+    }, msUntilNext);
+  }
+
+  function bgmStart() {
+    if (bgmRunning || bgmMuted) return;
+    const ac = audio();
+    if (!ac) return;
+    if (!bgmMaster) {
+      bgmMaster = ac.createGain();
+      bgmMaster.connect(ac.destination);
+    }
+    // Fade in.
+    bgmMaster.gain.cancelScheduledValues(ac.currentTime);
+    bgmMaster.gain.setValueAtTime(0, ac.currentTime);
+    bgmMaster.gain.linearRampToValueAtTime(BGM_MASTER_VOL, ac.currentTime + 0.8);
+    bgmRunning = true;
+    bgmScheduleLoop(ac, ac.currentTime + 0.05);
+    notifyBgmListeners();
+  }
+
+  function bgmStop() {
+    if (!bgmRunning) return;
+    bgmRunning = false;
+    if (bgmTimer) { clearTimeout(bgmTimer); bgmTimer = null; }
+    const ac = audio();
+    if (ac && bgmMaster) {
+      bgmMaster.gain.cancelScheduledValues(ac.currentTime);
+      bgmMaster.gain.setValueAtTime(bgmMaster.gain.value, ac.currentTime);
+      bgmMaster.gain.linearRampToValueAtTime(0, ac.currentTime + 0.4);
+    }
+    notifyBgmListeners();
+  }
+
+  function bgmToggle() {
+    bgmMuted = !bgmMuted;
+    try { localStorage.setItem("igame.bgm.muted", bgmMuted ? "1" : "0"); } catch (_) {}
+    if (bgmMuted) bgmStop();
+    else bgmStart();
+    notifyBgmListeners();
+    return bgmMuted;
+  }
+
+  window.BGM = {
+    start: bgmStart,
+    stop: bgmStop,
+    toggle: bgmToggle,
+    isMuted: () => bgmMuted,
+    isOn: () => bgmRunning && !bgmMuted,
+    onChange: (fn) => { bgmListeners.push(fn); return () => { bgmListeners = bgmListeners.filter(f => f !== fn); }; }
+  };
+
   // Try to unlock audio on first user gesture
   const unlock = () => { audio(); window.removeEventListener("pointerdown", unlock); };
   window.addEventListener("pointerdown", unlock);

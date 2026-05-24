@@ -333,7 +333,14 @@ app.innerHTML = `
       <div class="modal-panel">
         <div class="modal-head">
           <h2>Log</h2>
-          <button id="closeModalButton" class="icon-button">Close</button>
+          <div class="modal-head-actions">
+            <button id="bgmToggleButton" class="bgm-toggle" type="button" aria-label="BGM 切替">
+              <span class="bgm-icon" aria-hidden="true">🎵</span>
+              <span class="bgm-label">BGM</span>
+              <span id="bgmState" class="bgm-state">ON</span>
+            </button>
+            <button id="closeModalButton" class="icon-button">Close</button>
+          </div>
         </div>
         <div id="logTabs" class="log-tabs"></div>
         <ol id="log" class="log"></ol>
@@ -406,6 +413,8 @@ const menuButton = document.querySelector<HTMLButtonElement>("#menuButton")!;
 const menuModal = document.querySelector<HTMLDivElement>("#menuModal")!;
 const modalBackdrop = document.querySelector<HTMLDivElement>("#modalBackdrop")!;
 const closeModalButton = document.querySelector<HTMLButtonElement>("#closeModalButton")!;
+const bgmToggleButton = document.querySelector<HTMLButtonElement>("#bgmToggleButton")!;
+const bgmStateLabel = document.querySelector<HTMLSpanElement>("#bgmState")!;
 const nameInput = document.querySelector<HTMLInputElement>("#nameInput")!;
 const codeInput = document.querySelector<HTMLInputElement>("#codeInput")!;
 const avatarInput = document.querySelector<HTMLInputElement>("#avatarInput")!;
@@ -1097,6 +1106,12 @@ function updateUi(state: RoomState | null) {
   const isFinished = state.phase === "finished";
   const inGame = !inLobby;
 
+  // Auto-start BGM when the game is in progress, fade it out on lobby/finished.
+  // BGM.start() is a no-op if already running or if the user has muted via the
+  // menu toggle, so it's safe to call on every state update.
+  if (state.phase === "playing") (window as any).BGM?.start?.();
+  else (window as any).BGM?.stop?.();
+
   lobbyScreen.classList.toggle("hidden", !inLobby);
   gameScreen.classList.toggle("hidden", !inGame || isFinished);
   resultScreen.classList.toggle("hidden", !isFinished);
@@ -1395,6 +1410,20 @@ function setModalOpen(open: boolean) {
 menuButton.addEventListener("click", () => setModalOpen(true));
 modalBackdrop.addEventListener("click", () => setModalOpen(false));
 closeModalButton.addEventListener("click", () => setModalOpen(false));
+
+// === BGM toggle ===
+function refreshBgmButton() {
+  const muted = (window as any).BGM?.isMuted?.() ?? false;
+  bgmToggleButton.classList.toggle("muted", muted);
+  bgmStateLabel.textContent = muted ? "OFF" : "ON";
+  bgmToggleButton.setAttribute("aria-pressed", muted ? "false" : "true");
+}
+refreshBgmButton();
+(window as any).BGM?.onChange?.(refreshBgmButton);
+bgmToggleButton.addEventListener("click", () => {
+  (window as any).BGM?.toggle?.();
+  refreshBgmButton();
+});
 
 copyButton.addEventListener("click", async () => {
   await navigator.clipboard.writeText(inviteLink.value);
