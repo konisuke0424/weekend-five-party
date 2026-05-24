@@ -3,6 +3,7 @@ import { createServer } from "node:http";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { Server } from "socket.io";
 
 function resolveVersion() {
@@ -28,7 +29,7 @@ const io = new Server(server, { cors: { origin: true } });
 const PORT = Number(process.env.PORT || 3001);
 const ROOM_SIZE = 6;
 const INITIAL_FOLLOWERS = 50000;
-const DECK_PER_PLAYER = 15;
+const DECK_PER_PLAYER = 11;
 const HAND_SIZE = 5;
 const CPU_TURN_DELAY_MS = 2700;
 const MAX_MOTIVATION = 3;
@@ -37,6 +38,7 @@ const IDLE_TIMEOUT_MS = 60000;
 const IDLE_WARNING_AT_MS = IDLE_TIMEOUT_MS - 10000; // 残り10秒で警告 (= 50秒経過時点)
 const IDLE_RETIRE_STRIKES = 2;
 const BURNING_DAMAGE_DELAY_MS = 1500; // 直前のカード演出と炎上ダメージ処理を分離する遅延
+const DISCONNECT_RETIRE_MS = 30000;  // オフライン状態が 30 秒続いたら自動引退
 const COLORS = ["#ff5a5f", "#00a6ed", "#f5b700", "#7bc950", "#a855f7"];
 const ROLES = ["炎上系", "アイドル", "知識系", "インスタグラマー", "エンタメ系", "レビュー系"];
 const rooms = new Map();
@@ -231,6 +233,7 @@ function makeCode() {
 function makePlayer(socket, name) {
   return {
     id: socket.id,
+    sessionToken: randomUUID(),
     name: (name || names[Math.floor(Math.random() * names.length)]).toString().slice(0, 14),
     avatarDataUrl: null,
     color: COLORS[Math.floor(Math.random() * COLORS.length)],
@@ -256,13 +259,15 @@ function makePlayer(socket, name) {
     bonusMotivation: 0,
     idleTimer: null,
     idleWarningTimer: null,
-    idleStrikes: 0
+    idleStrikes: 0,
+    disconnectRetireTimer: null
   };
 }
 
 function makeCpuPlayer(index) {
   return {
     id: `cpu-${Date.now()}-${index}-${Math.random().toString(36).slice(2, 7)}`,
+    sessionToken: null,
     name: cpuNames[index % cpuNames.length],
     avatarDataUrl: null,
     color: COLORS[index % COLORS.length],
@@ -288,7 +293,8 @@ function makeCpuPlayer(index) {
     bonusMotivation: 0,
     idleTimer: null,
     idleWarningTimer: null,
-    idleStrikes: 0
+    idleStrikes: 0,
+    disconnectRetireTimer: null
   };
 }
 
@@ -427,6 +433,7 @@ function retireIfNeeded(room, player) {
     }
     addLog(room, `${player.name} は引退した`, player.id);
     clearIdleTimer(player);
+    clearDisconnectRetireTimer(player);
   }
 }
 
@@ -443,6 +450,10 @@ function clearIdleTimer(player) {
 
 function clearAllIdleTimers(room) {
   for (const p of room.players) clearIdleTimer(p);
+}
+
+function clearAllDisconnectTimers(room) {
+  for (const p of room.players) clearDisconnectRetireTimer(p);
 }
 
 function startIdleTimer(room, player) {
@@ -479,6 +490,74 @@ function onActiveAction(room, player) {
   player.idleStrikes = 0;
   clearIdleTimer(player);
   if (had > 0) console.log(`[idle] action by ${player.name}: strikes reset (was ${had})`);
+}
+
+function clearDisconnectRetireTimer(player) {
+  if (player && player.disconnectRetireTimer) {
+    clearTimeout(player.disconnectRetireTimer);
+    player.disconnectRetireTimer = null;
+  }
+}
+
+function armDisconnectRetireTimer(room, player) {
+  clearDisconnectRetireTimer(player);
+  if (player.isCpu || player.retired) return;
+  player.disconnectRetireTimer = setTimeout(() => onDisconnectRetire(room, player), DISCONNECT_RETIRE_MS);
+  console.log(`[disconnect] armed 30s retire timer for ${player.name} (room=${room.code})`);
+}
+
+function onDisconnectRetire(room, player) {
+  player.disconnectRetireTimer = null;
+  if (!rooms.has(room.code)) return;
+  if (room.phase !== "playing") return;
+  if (player.retired) return;
+  if (player.connected) {
+    console.log(`[disconnect] ${player.name} reconnected before timeout; skipping retire`);
+    return;
+  }
+  console.log(`[disconnect] retiring ${player.name} after 30s offline`);
+  addLog(room, `${player.name} は30秒オフラインで引退`, player.id);
+  player.followers = 0;
+  player.retired = true;
+  if (player.hand.length > 0) {
+    room.deck.push(...player.hand);
+    player.hand = [];
+    room.deck = shuffle(room.deck);
+  }
+  clearIdleTimer(player);
+  // 自分のターン中だった場合は次プレイヤーへ
+  if (room.currentPlayerId === player.id) {
+    advanceTurn(room);
+  }
+  if (!checkWin(room)) {
+    // checkWin が finished にしてれば broadcast はそちらで OK だが、現状 checkWin の broadcast は呼び出し側任せ。
+  }
+  broadcast(room);
+}
+
+// セッション再開: 新しい socket id を既存 player に紐付け直す。
+// player.id は他フィールド (room.currentPlayerId, lastPlayed.playerId, burningSourceId 等) から参照されているので、
+// 全部まとめてマイグレートする。
+function migratePlayerId(room, player, newId) {
+  const oldId = player.id;
+  if (oldId === newId) return;
+  player.id = newId;
+  if (room.currentPlayerId === oldId) room.currentPlayerId = newId;
+  if (room.hostId === oldId) room.hostId = newId;
+  if (room.lastPlayed?.playerId === oldId) room.lastPlayed.playerId = newId;
+  if (room.lastSkipped?.playerId === oldId) room.lastSkipped.playerId = newId;
+  if (room.lastMulligan?.playerId === oldId) room.lastMulligan.playerId = newId;
+  if (room.lastBurningDamage?.playerId === oldId) room.lastBurningDamage.playerId = newId;
+  if (room.lastIdleWarning?.playerId === oldId) room.lastIdleWarning.playerId = newId;
+  for (const p of room.players) {
+    if (p.burningSourceId === oldId) p.burningSourceId = newId;
+  }
+  // 過去ログの subjectId / targetId も更新（フィルタリングが効くように）
+  for (const entry of room.structuredLog) {
+    if (entry.subjectId === oldId) entry.subjectId = newId;
+    if (entry.targetId === oldId) entry.targetId = newId;
+  }
+  console.log(`[resume] migrated player id ${oldId} -> ${newId} (name=${player.name})`);
 }
 
 function onIdleTimeout(room, player) {
@@ -523,6 +602,7 @@ function checkWin(room) {
     room.message = alive[0] ? `${alive[0].name} の勝利` : "全員引退";
     addLog(room, room.message);
     clearAllIdleTimers(room);
+    clearAllDisconnectTimers(room);
     if (room.cpuTimer) { clearTimeout(room.cpuTimer); room.cpuTimer = null; }
     if (room.beginTurnTimer) { clearTimeout(room.beginTurnTimer); room.beginTurnTimer = null; }
     return true;
@@ -539,6 +619,7 @@ function checkWin(room) {
     addLog(room, "デッキがなくなった");
     addLog(room, room.message);
     clearAllIdleTimers(room);
+    clearAllDisconnectTimers(room);
     if (room.cpuTimer) { clearTimeout(room.cpuTimer); room.cpuTimer = null; }
     if (room.beginTurnTimer) { clearTimeout(room.beginTurnTimer); room.beginTurnTimer = null; }
     return true;
@@ -769,6 +850,7 @@ function startGame(room) {
     player.mulliganedThisTurn = false;
     player.idleStrikes = 0;
     clearIdleTimer(player);
+    clearDisconnectRetireTimer(player);
     // 毎日配信は「初手」として全プレイヤーに必ず配る（仕様 v0.3）
     player.hand.push(createCard("daily_stream", index));
     drawCards(room, player, HAND_SIZE - 1);
@@ -1217,7 +1299,7 @@ io.on("connection", (socket) => {
     rooms.set(code, room);
     socket.data.roomCode = code;
     socket.join(code);
-    reply?.({ ok: true, room: publicRoom(room, socket.id), playerId: socket.id });
+    reply?.({ ok: true, room: publicRoom(room, socket.id), playerId: socket.id, sessionToken: player.sessionToken });
     broadcast(room);
   });
 
@@ -1242,7 +1324,45 @@ io.on("connection", (socket) => {
     socket.data.roomCode = room.code;
     socket.join(room.code);
     addLog(room, `${player.name} が参加`);
-    reply?.({ ok: true, room: publicRoom(room, socket.id), playerId: socket.id });
+    reply?.({ ok: true, room: publicRoom(room, socket.id), playerId: socket.id, sessionToken: player.sessionToken });
+    broadcast(room);
+  });
+
+  // セッション再開: クライアント側で localStorage に保存していた sessionToken で
+  // 切断前のプレイヤースロットに復帰する。失敗時はクライアント側で localStorage を
+  // 破棄して通常のロビーフローへフォールバックする想定。
+  socket.on("room:resume", ({ code, sessionToken } = {}, reply) => {
+    const normalized = (code || "").toString().trim().toUpperCase();
+    const room = rooms.get(normalized);
+    if (!room) {
+      reply?.({ ok: false, error: "Room not found" });
+      return;
+    }
+    if (!sessionToken) {
+      reply?.({ ok: false, error: "Missing session token" });
+      return;
+    }
+    const player = room.players.find((p) => p.sessionToken === sessionToken);
+    if (!player) {
+      reply?.({ ok: false, error: "Session not found" });
+      return;
+    }
+    const oldId = player.id;
+    migratePlayerId(room, player, socket.id);
+    player.connected = true;
+    clearDisconnectRetireTimer(player);
+    socket.data.roomCode = room.code;
+    socket.join(room.code);
+    if (oldId !== socket.id) {
+      addLog(room, `${player.name} が再接続`, player.id);
+    }
+    console.log(`[resume] ${player.name} resumed (room=${room.code}, retired=${player.retired})`);
+    reply?.({
+      ok: true,
+      room: publicRoom(room, socket.id),
+      playerId: socket.id,
+      sessionToken: player.sessionToken
+    });
     broadcast(room);
   });
 
@@ -1259,6 +1379,7 @@ io.on("connection", (socket) => {
     if (room.phase !== "finished" && room.phase !== "lobby") return;
     // Drop CPU fillers so the host can re-arrange seats. Real players stay.
     clearAllIdleTimers(room);
+    clearAllDisconnectTimers(room);
     room.players = room.players.filter((p) => !p.isCpu);
     if (room.cpuTimer) { clearTimeout(room.cpuTimer); room.cpuTimer = null; }
     if (room.beginTurnTimer) { clearTimeout(room.beginTurnTimer); room.beginTurnTimer = null; }
@@ -1481,7 +1602,10 @@ io.on("connection", (socket) => {
     const room = getRoomForSocket(socket);
     if (!room) return;
     const leaving = room.players.find((player) => player.id === socket.id);
-    if (leaving) clearIdleTimer(leaving);
+    if (leaving) {
+      clearIdleTimer(leaving);
+      clearDisconnectRetireTimer(leaving);
+    }
     room.players = room.players.filter((player) => player.id !== socket.id);
     socket.leave(room.code);
     socket.data.roomCode = null;
@@ -1500,7 +1624,17 @@ io.on("connection", (socket) => {
     const room = getRoomForSocket(socket);
     if (!room) return;
     const player = room.players.find((candidate) => candidate.id === socket.id);
-    if (player) player.connected = false;
+    if (player) {
+      player.connected = false;
+      console.log(`[disconnect] ${player.name} (id=${player.id}) went offline in room ${room.code}`);
+      // 30 秒オフラインが続いたら自動引退。プレイ中のみ。
+      // ロビー / 終了済みは引退の概念がないので arm しない。
+      if (room.phase === "playing" && !player.retired && !player.isCpu) {
+        armDisconnectRetireTimer(room, player);
+      }
+      // 念のためアイドルタイマーも停止 (再接続後にあらためて armed される)
+      clearIdleTimer(player);
+    }
     if (room.hostId === socket.id) {
       const nextHost = room.players.find((candidate) => candidate.connected);
       if (nextHost) room.hostId = nextHost.id;

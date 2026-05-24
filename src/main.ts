@@ -1274,9 +1274,30 @@ function callback<T>(event: string, payload: unknown) {
   });
 }
 
+// === Session persistence: save token on create/join, restore on reload ===
+type SessionData = { code: string; sessionToken: string };
+const SESSION_KEY = "igame.session";
+function saveSession(data: SessionData) {
+  try { localStorage.setItem(SESSION_KEY, JSON.stringify(data)); } catch (_) {}
+}
+function loadSession(): SessionData | null {
+  try {
+    const raw = localStorage.getItem(SESSION_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed.code === "string" && typeof parsed.sessionToken === "string") {
+      return parsed;
+    }
+  } catch (_) {}
+  return null;
+}
+function clearSession() {
+  try { localStorage.removeItem(SESSION_KEY); } catch (_) {}
+}
+
 createButton.addEventListener("click", async () => {
   joinError.textContent = "";
-  const reply = await callback<{ ok: boolean; room?: RoomState; playerId?: string; error?: string }>("room:create", {
+  const reply = await callback<{ ok: boolean; room?: RoomState; playerId?: string; sessionToken?: string; error?: string }>("room:create", {
     name: nameInput.value
   });
   if (!reply.ok || !reply.room || !reply.playerId) {
@@ -1284,12 +1305,13 @@ createButton.addEventListener("click", async () => {
     return;
   }
   myId = reply.playerId;
+  if (reply.sessionToken) saveSession({ code: reply.room.code, sessionToken: reply.sessionToken });
   updateUi(reply.room);
 });
 
 joinButton.addEventListener("click", async () => {
   joinError.textContent = "";
-  const reply = await callback<{ ok: boolean; room?: RoomState; playerId?: string; error?: string }>("room:join", {
+  const reply = await callback<{ ok: boolean; room?: RoomState; playerId?: string; sessionToken?: string; error?: string }>("room:join", {
     code: codeInput.value,
     name: nameInput.value
   });
@@ -1298,8 +1320,31 @@ joinButton.addEventListener("click", async () => {
     return;
   }
   myId = reply.playerId;
+  if (reply.sessionToken) saveSession({ code: reply.room.code, sessionToken: reply.sessionToken });
   updateUi(reply.room);
 });
+
+// Try to resume on first connect (after the socket completes handshake).
+let attemptedResume = false;
+async function tryResume() {
+  if (attemptedResume) return;
+  attemptedResume = true;
+  const stored = loadSession();
+  if (!stored) return;
+  const reply = await callback<{ ok: boolean; room?: RoomState; playerId?: string; sessionToken?: string; error?: string }>(
+    "room:resume",
+    { code: stored.code, sessionToken: stored.sessionToken }
+  );
+  if (!reply.ok || !reply.room || !reply.playerId) {
+    console.warn("[resume] failed:", reply.error);
+    clearSession();
+    return;
+  }
+  myId = reply.playerId;
+  if (reply.sessionToken) saveSession({ code: reply.room.code, sessionToken: reply.sessionToken });
+  console.log("[resume] success:", reply.room.code);
+  updateUi(reply.room);
+}
 
 lobbyPlayers.addEventListener("click", (event) => {
   const button = (event.target as Element).closest<HTMLButtonElement>(".avatar-upload");
@@ -1590,6 +1635,9 @@ hand.addEventListener("pointerdown", (e) => {
 socket.on("connect", () => {
   connectionText.textContent = "online";
   connection.classList.add("online");
+  // First time we connect, try to resume any saved session. If the user is
+  // mid-game and reloaded, this re-binds to their original player slot.
+  tryResume();
 });
 
 socket.on("disconnect", () => {
