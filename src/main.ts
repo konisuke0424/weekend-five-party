@@ -74,6 +74,7 @@ type Player = {
   antiTurns: number;
   burningTurns: number;
   followerDelta: number;
+  idleStrikes?: number;
 };
 
 type RoomState = {
@@ -566,6 +567,10 @@ function statusBadges(player: Player, state: RoomState) {
   void state;
   const out: string[] = [];
   if (player.burning) out.push(`<span class="badge burning">炎上</span>`);
+  // 無操作カウント: 1回目時点で見えるようにして、次の無操作で引退することを警告。
+  if ((player.idleStrikes ?? 0) > 0 && !player.retired) {
+    out.push(`<span class="badge idle-strike">無操作${player.idleStrikes}/2</span>`);
+  }
   if (player.skipTurns > 0) out.push(`<span class="badge rest">休み${player.skipTurns}</span>`);
   const totalGain = (player.gainBoosts ?? 0) * 10 + (player.trendingBoosts ?? 0) * 30;
   if (totalGain > 0) out.push(`<span class="badge boost">+${totalGain}%</span>`);

@@ -314,7 +314,8 @@ function visiblePlayer(player) {
     premiumSubscribed: player.premiumSubscribed,
     antiTurns: player.antiTurns,
     burningTurns: player.burningTurns,
-    followerDelta: player.followerDelta
+    followerDelta: player.followerDelta,
+    idleStrikes: player.idleStrikes || 0
   };
 }
 
@@ -446,11 +447,15 @@ function clearAllIdleTimers(room) {
 
 function startIdleTimer(room, player) {
   clearIdleTimer(player);
-  if (player.isCpu || player.retired) return;
+  if (player.isCpu || player.retired) {
+    console.log(`[idle] skip armIdleTimer: ${player.name} isCpu=${player.isCpu} retired=${player.retired}`);
+    return;
+  }
   // 警告: 残り10秒を切った時点で broadcast (lastIdleWarning)
   player.idleWarningTimer = setTimeout(() => emitIdleWarning(room, player), IDLE_WARNING_AT_MS);
   // 自動ターン終了
   player.idleTimer = setTimeout(() => onIdleTimeout(room, player), IDLE_TIMEOUT_MS);
+  console.log(`[idle] armed timer for ${player.name} (room=${room.code}, strikes=${player.idleStrikes ?? 0}/${IDLE_RETIRE_STRIKES})`);
 }
 
 function emitIdleWarning(room, player) {
@@ -470,22 +475,27 @@ function emitIdleWarning(room, player) {
 
 function onActiveAction(room, player) {
   if (!player) return;
+  const had = player.idleStrikes || 0;
   player.idleStrikes = 0;
   clearIdleTimer(player);
+  if (had > 0) console.log(`[idle] action by ${player.name}: strikes reset (was ${had})`);
 }
 
 function onIdleTimeout(room, player) {
-  if (!room || !rooms.has(room.code)) return;
-  if (room.phase !== "playing") return;
-  if (room.currentPlayerId !== player.id) return;
-  if (player.retired) return;
+  console.log(`[idle] TIMEOUT fired for ${player.name} (room=${room.code}, phase=${room.phase}, currentPlayerId=${room.currentPlayerId}, this.id=${player.id}, retired=${player.retired}, strikes=${player.idleStrikes ?? 0})`);
+  if (!room || !rooms.has(room.code)) { console.log(`[idle] bail: room gone`); return; }
+  if (room.phase !== "playing") { console.log(`[idle] bail: phase=${room.phase}`); return; }
+  if (room.currentPlayerId !== player.id) { console.log(`[idle] bail: not current player anymore`); return; }
+  if (player.retired) { console.log(`[idle] bail: already retired`); return; }
   player.idleStrikes = (player.idleStrikes || 0) + 1;
+  console.log(`[idle] strike incremented for ${player.name}: ${player.idleStrikes}/${IDLE_RETIRE_STRIKES}`);
   addLog(
     room,
     `${player.name} は60秒無操作で自動ターン終了 (${player.idleStrikes}/${IDLE_RETIRE_STRIKES})`,
     player.id
   );
   if (player.idleStrikes >= IDLE_RETIRE_STRIKES) {
+    console.log(`[idle] RETIRING ${player.name} due to ${player.idleStrikes} consecutive idle strikes`);
     addLog(room, `${player.name} は連続無操作で引退`, player.id);
     player.followers = 0;
     player.retired = true;
